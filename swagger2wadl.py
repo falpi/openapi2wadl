@@ -145,19 +145,38 @@ def generate_xsd(definitions, used_definitions, root_elements, output_dir, swagg
 
             if swagger_type == "array":
                 items = prop_attrs.get("items", {})
-                item_type = map_swagger_type_to_xsd(items.get("type"), items.get("format"))
                 wrapper_el = ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
                     "name": prop_name,
                     "minOccurs": "1" if prop_name in required_fields else "0"
                 })
                 complex_el = ET.SubElement(wrapper_el, f"{{{XSD_NAMESPACE}}}complexType")
                 array_seq = ET.SubElement(complex_el, f"{{{XSD_NAMESPACE}}}sequence")
-                ET.SubElement(array_seq, f"{{{XSD_NAMESPACE}}}element", attrib={
-                    "name": "item",
-                    "type": f"xs:{item_type}",
-                    "minOccurs": "0",
-                    "maxOccurs": "unbounded"
-                })
+
+                # Gestione item con restrizioni
+                if items.get("type") == "string" and any(k in items for k in ["minLength", "maxLength", "pattern"]):
+                    item_el = ET.SubElement(array_seq, f"{{{XSD_NAMESPACE}}}element", attrib={
+                        "name": "item",
+                        "minOccurs": "0",
+                        "maxOccurs": "unbounded"
+                    })
+                    simple_type = ET.SubElement(item_el, f"{{{XSD_NAMESPACE}}}simpleType")
+                    restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", attrib={
+                        "base": "xs:string"
+                    })
+                    if "minLength" in items:
+                        ET.SubElement(restriction, f"{{{XSD_NAMESPACE}}}minLength", value=str(items["minLength"]))
+                    if "maxLength" in items:
+                        ET.SubElement(restriction, f"{{{XSD_NAMESPACE}}}maxLength", value=str(items["maxLength"]))
+                    if "pattern" in items:
+                        ET.SubElement(restriction, f"{{{XSD_NAMESPACE}}}pattern", value=items["pattern"])
+                else:
+                    item_type = map_swagger_type_to_xsd(items.get("type"), items.get("format"))
+                    ET.SubElement(array_seq, f"{{{XSD_NAMESPACE}}}element", attrib={
+                        "name": "item",
+                        "type": f"xs:{item_type}",
+                        "minOccurs": "0",
+                        "maxOccurs": "unbounded"
+                    })
 
             elif swagger_type == "object" and "properties" in prop_attrs:
                 el = ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
@@ -197,7 +216,7 @@ def generate_xsd(definitions, used_definitions, root_elements, output_dir, swagg
                     "minOccurs": "1" if prop_name in required_fields else "0"
                 })
 
-    # Solo gli element per i root type (richiesti dal WADL)
+    # Solo gli elementi globali usati nel WADL
     for def_name in sorted(root_elements):
         ET.SubElement(schema, f"{{{XSD_NAMESPACE}}}element", attrib={
             "name": def_name,
