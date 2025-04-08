@@ -149,8 +149,8 @@ def generate_wadl(swagger, definitions, xsd_filename, output_dir, swagger_file):
     })
     grammars = ET.SubElement(application, "grammars")
     
-    swagger_filename =  Path(swagger_file).stem    
-    ET.SubElement(grammars, "include", href=f"{Path(swagger_file).stem}.xsd")
+    swagger_filename = Path(swagger_file).stem    
+    ET.SubElement(grammars, "include", href=f"{swagger_filename}.xsd")
 
     resources = ET.SubElement(application, "resources", base=swagger.get("host", "http://localhost") + swagger.get("basePath", "/"))
     used_definitions = set()
@@ -161,15 +161,15 @@ def generate_wadl(swagger, definitions, xsd_filename, output_dir, swagger_file):
         for method_name, method_spec in methods.items():
             method = ET.SubElement(resource, "method", name=method_name.upper())
 
-            request = None
-            for param in method_spec.get("parameters", []):
-                if request is None:
-                    request = ET.SubElement(method, "request")
+            parameters = method_spec.get("parameters", [])
+            consumes = method_spec.get("consumes", [])
+            request = ET.SubElement(method, "request")  # Sempre presente, anche se vuoto
 
+            for param in parameters:
                 if param.get("in") == "body" and "$ref" in param.get("schema", {}):
                     ref_name = param["schema"]["$ref"].split("/")[-1]
                     used_definitions.add(ref_name)
-                    for media_type in ["application/xml", "application/json"]:
+                    for media_type in consumes or ["application/xml", "application/json"]:
                         ET.SubElement(request, "representation", mediaType=media_type, element=f"{XSD_PREFIX}:{ref_name}")
                 else:
                     param_in = param.get("in")
@@ -214,8 +214,6 @@ def generate_wadl(swagger, definitions, xsd_filename, output_dir, swagger_file):
                             "mediaType": media_type
                         })
 
-    # Determine WADL output filename based on Swagger input
-    swagger_filename =  Path(swagger_file).stem
     output_file = os.path.join(output_dir, f"{swagger_filename}.wadl")
     with open(output_file, "w") as f:
         f.write(prettify_xml(application))
