@@ -34,6 +34,70 @@ def prettify_xml(elem):
 def parse_swagger(swagger):
     return swagger.get("definitions", {})
 
+def resolve_inline_properties(schema, definitions):
+    """
+    Espande le proprietà inline di uno schema (senza $ref) ricorsivamente,
+    restituendo un dizionario {nome_prop: definizione completa} e required.
+    I $ref vengono lasciati intatti per mantenere il legame tra i tipi.
+    """
+    if "$ref" in schema:
+        return {}, []
+
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    return properties, required
+
+def collect_used_definitions_from_wadl(swagger, definitions):
+    """
+    Analizza lo Swagger e raccoglie ricorsivamente tutti i nomi delle definizioni referenziate,
+    incluse quelle annidate via $ref in oggetti o array.
+    """
+    used = set()
+
+    def visit_schema(schema):
+        if not isinstance(schema, dict):
+            return
+        # Caso diretto: $ref
+        if "$ref" in schema:
+            ref_name = schema["$ref"].split("/")[-1]
+            if ref_name not in used:
+                used.add(ref_name)
+                ref_def = definitions.get(ref_name)
+                if ref_def:
+                    visit_schema(ref_def)  # Ricorsione sul tipo referenziato
+        # Caso array
+        elif schema.get("type") == "array" and "items" in schema:
+            visit_schema(schema["items"])
+        # Caso oggetto inline
+        elif schema.get("type") == "object":
+            for prop in schema.get("properties", {}).values():
+                visit_schema(prop)
+
+    # Analizza tutti i path del WADL
+    for path, methods in swagger.get("paths", {}).items():
+        for method_spec in methods.values():
+            # Request body
+            for param in method_spec.get("parameters", []):
+                if param.get("in") == "body" and "schema" in param:
+                    visit_schema(param["schema"])
+            # Responses
+            for response in method_spec.get("responses", {}).values():
+                if "schema" in response:
+                    visit_schema(response["schema"])
+
+    return used
+
+# Resolve deep $ref chains recursively to flatten all inherited properties
+def resolve_schema(schema, definitions):
+    if "$ref" in schema:
+        ref_name = schema["$ref"].split("/")[-1]
+        resolved = definitions.get(ref_name, {})
+        return resolve_schema(resolved, definitions)
+    else:
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        return properties, required
+
 # Mapping Swagger types to XSD
 def map_swagger_type_to_xsd(swagger_type, swagger_format=None):
     if swagger_type == "string" and swagger_format == "date-time":
@@ -65,10 +129,20 @@ def generate_xsd(definitions, used_definitions, output_dir, swagger_file):
 
         complex_type = ET.Element(f"{{{XSD_NAMESPACE}}}complexType", name=def_name)
         sequence = ET.SubElement(complex_type, f"{{{XSD_NAMESPACE}}}sequence")
-        required_fields = def_body.get("required", [])
-        properties = def_body.get("properties", {})
+
+        properties, required_fields = resolve_inline_properties(def_body, definitions)
 
         for prop_name, prop_attrs in properties.items():
+            if "$ref" in prop_attrs:
+                ref_name = prop_attrs["$ref"].split("/")[-1]
+                used_definitions.add(ref_name)
+                ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
+                    "name": prop_name,
+                    "type": f"{XSD_PREFIX}:{ref_name}",
+                    "minOccurs": "1" if prop_name in required_fields else "0"
+                })
+                continue
+
             swagger_type = prop_attrs.get("type")
             swagger_format = prop_attrs.get("format")
 
@@ -89,7 +163,6 @@ def generate_xsd(definitions, used_definitions, output_dir, swagger_file):
                 })
 
             elif swagger_type == "object" and "properties" in prop_attrs:
-                # Tipo inline con sotto-proprietà
                 el = ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
                     "name": prop_name,
                     "minOccurs": "1" if prop_name in required_fields else "0"
@@ -102,14 +175,6 @@ def generate_xsd(definitions, used_definitions, output_dir, swagger_file):
                         "name": sub_name,
                         "type": f"xs:{sub_type}"
                     })
-
-            elif swagger_type == "string" and swagger_format in ["date", "date-time"]:
-                xsd_type = map_swagger_type_to_xsd(swagger_type, swagger_format)
-                ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
-                    "name": prop_name,
-                    "type": f"xs:{xsd_type}",
-                    "minOccurs": "1" if prop_name in required_fields else "0"
-                })
 
             elif swagger_type == "string" and any(k in prop_attrs for k in ["minLength", "maxLength", "pattern"]):
                 el = ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
@@ -149,7 +214,6 @@ def generate_xsd(definitions, used_definitions, output_dir, swagger_file):
             "type": f"{XSD_PREFIX}:{type_name}"
         })
 
-    # Determine output file name based on input Swagger file name
     swagger_filename = Path(swagger_file).stem
     output_file = os.path.join(output_dir, f"{swagger_filename}.xsd")
     with open(output_file, "w") as f:
@@ -235,26 +299,27 @@ def generate_wadl(swagger, definitions, xsd_filename, output_dir, swagger_file):
 
     return output_file
 
-# Main function to execute the conversion
 def main():
-    parser = argparse.ArgumentParser(description="Convert Swagger JSON to WADL and XSD.")
-    parser.add_argument("swagger_file", help="Path to the Swagger JSON file")
-    parser.add_argument("output_dir", help="Directory to save WADL and XSD files", nargs="?", default="")  # Optional output dir
+    parser = argparse.ArgumentParser(description="Convert Swagger 2.0 JSON to WADL + XSD.")
+    parser.add_argument("swagger_file", help="Input Swagger JSON file")
+    parser.add_argument("--output-dir", help="Output directory", default=".")
     args = parser.parse_args()
 
-    # Load Swagger JSON
+    os.makedirs(args.output_dir, exist_ok=True)
+
     with open(args.swagger_file, "r") as f:
         swagger = json.load(f)
 
-    # Parse definitions from Swagger
-    definitions = parse_swagger(swagger)
+    definitions = swagger.get("definitions", {})
+    
+    # 💡 Nuovo step: raccoglie tutti i tipi usati nel WADL
+    used_definitions = collect_used_definitions_from_wadl(swagger, definitions)
 
-    # Generate XSD file
-    xsd_filename = generate_xsd(definitions, definitions.keys(), args.output_dir, args.swagger_file)
-    print(f"Generated XSD: {xsd_filename}")
-
-    # Generate WADL file
+    # Ora che abbiamo tutto ciò che serve, generiamo XSD e WADL
+    xsd_filename = generate_xsd(definitions, used_definitions, args.output_dir, args.swagger_file)
     wadl_filename = generate_wadl(swagger, definitions, xsd_filename, args.output_dir, args.swagger_file)
+
+    print(f"Generated XSD: {xsd_filename}")
     print(f"Generated WADL: {wadl_filename}")
 
 if __name__ == "__main__":
