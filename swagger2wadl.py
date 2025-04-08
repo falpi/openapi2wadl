@@ -136,6 +136,9 @@ def generate_xsd(definitions, used_definitions, root_elements, output_dir, swagg
         required_fields = def_body.get("required", [])
 
         for prop_name, prop_attrs in properties.items():
+            if prop_attrs.get("required") is True:
+               print(f"Warning: 'required: true' found inside property '{prop_name}' in definition '{def_name}' – ignored (not valid in Swagger 2.0)")       
+        
             if "$ref" in prop_attrs:
                 ref_name = prop_attrs["$ref"].split("/")[-1]
                 used_definitions.add(ref_name)
