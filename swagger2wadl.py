@@ -88,6 +88,21 @@ def generate_xsd(definitions, used_definitions, output_dir, swagger_file):
                     "maxOccurs": "unbounded"
                 })
 
+            elif swagger_type == "object" and "properties" in prop_attrs:
+                # Tipo inline con sotto-proprietà
+                el = ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
+                    "name": prop_name,
+                    "minOccurs": "1" if prop_name in required_fields else "0"
+                })
+                inline_complex = ET.SubElement(el, f"{{{XSD_NAMESPACE}}}complexType")
+                inline_seq = ET.SubElement(inline_complex, f"{{{XSD_NAMESPACE}}}sequence")
+                for sub_name, sub_attrs in prop_attrs["properties"].items():
+                    sub_type = map_swagger_type_to_xsd(sub_attrs.get("type"), sub_attrs.get("format"))
+                    ET.SubElement(inline_seq, f"{{{XSD_NAMESPACE}}}element", attrib={
+                        "name": sub_name,
+                        "type": f"xs:{sub_type}"
+                    })
+
             elif swagger_type == "string" and swagger_format in ["date", "date-time"]:
                 xsd_type = map_swagger_type_to_xsd(swagger_type, swagger_format)
                 ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
@@ -135,7 +150,7 @@ def generate_xsd(definitions, used_definitions, output_dir, swagger_file):
         })
 
     # Determine output file name based on input Swagger file name
-    swagger_filename =  Path(swagger_file).stem
+    swagger_filename = Path(swagger_file).stem
     output_file = os.path.join(output_dir, f"{swagger_filename}.xsd")
     with open(output_file, "w") as f:
         f.write(prettify_xml(schema))
