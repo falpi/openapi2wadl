@@ -111,26 +111,23 @@ def map_swagger_type_to_xsd(swagger_type, swagger_format=None):
         "number": "decimal"
     }.get(swagger_type, "string")
 
-def generate_xsd(definitions, used_definitions, output_dir, swagger_file):
+def generate_xsd(definitions, used_definitions, root_elements, output_dir, swagger_file):
     schema = ET.Element(f"{{{XSD_NAMESPACE}}}schema", attrib={
         "targetNamespace": XSD_TARGET_NAMESPACE,
         "elementFormDefault": "unqualified",
         f"xmlns:{XSD_PREFIX}": XSD_TARGET_NAMESPACE
     })
 
-    complex_types = []
-    element_defs = []
-
     for def_name, def_body in definitions.items():
         is_used = def_name in used_definitions
-
         if not is_used:
-            complex_types.append(ET.Comment(f"unused type: {def_name}"))
+            schema.append(ET.Comment(f"unused type: {def_name}"))
 
-        complex_type = ET.Element(f"{{{XSD_NAMESPACE}}}complexType", name=def_name)
+        complex_type = ET.SubElement(schema, f"{{{XSD_NAMESPACE}}}complexType", attrib={"name": def_name})
         sequence = ET.SubElement(complex_type, f"{{{XSD_NAMESPACE}}}sequence")
 
-        properties, required_fields = resolve_inline_properties(def_body, definitions)
+        properties = def_body.get("properties", {})
+        required_fields = def_body.get("required", [])
 
         for prop_name, prop_attrs in properties.items():
             if "$ref" in prop_attrs:
@@ -200,18 +197,11 @@ def generate_xsd(definitions, used_definitions, output_dir, swagger_file):
                     "minOccurs": "1" if prop_name in required_fields else "0"
                 })
 
-        complex_types.append(complex_type)
-
-        if is_used:
-            element_defs.append((def_name, def_name))
-
-    for complex_type in complex_types:
-        schema.append(complex_type)
-
-    for def_name, type_name in element_defs:
+    # Solo gli element per i root type (richiesti dal WADL)
+    for def_name in sorted(root_elements):
         ET.SubElement(schema, f"{{{XSD_NAMESPACE}}}element", attrib={
             "name": def_name,
-            "type": f"{XSD_PREFIX}:{type_name}"
+            "type": f"{XSD_PREFIX}:{def_name}"
         })
 
     swagger_filename = Path(swagger_file).stem
@@ -226,78 +216,78 @@ def generate_wadl(swagger, definitions, xsd_filename, output_dir, swagger_file):
         f"xmlns:{XSD_PREFIX}": XSD_TARGET_NAMESPACE,
         "xmlns:xs": XSD_NAMESPACE
     })
+
     grammars = ET.SubElement(application, "grammars")
-    
-    swagger_filename = Path(swagger_file).stem    
+    swagger_filename = Path(swagger_file).stem
     ET.SubElement(grammars, "include", href=f"{swagger_filename}.xsd")
 
-    resources = ET.SubElement(application, "resources", base=swagger.get("host", "http://localhost") + swagger.get("basePath", "/"))
+    resources = ET.SubElement(application, "resources",
+                              base=swagger.get("host", "http://localhost") + swagger.get("basePath", "/"))
+
     used_definitions = set()
+    root_element_types = set()
 
-    paths = swagger.get("paths", {})
-    for path, methods in paths.items():
-        resource = ET.SubElement(resources, "resource", path=path)
+    for path, methods in swagger.get("paths", {}).items():
+        resource = ET.SubElement(resources, "resource", attrib={"path": path})
         for method_name, method_spec in methods.items():
-            method = ET.SubElement(resource, "method", name=method_name.upper())
+            method = ET.SubElement(resource, "method", attrib={
+                "name": method_name.upper()
+            })
+            ET.SubElement(method, "doc", attrib={"xml:lang": "en", "title": method_spec.get("operationId", "")})
 
+            request = ET.SubElement(method, "request")
             parameters = method_spec.get("parameters", [])
             consumes = method_spec.get("consumes", [])
-            request = ET.SubElement(method, "request")  # Sempre presente, anche se vuoto
 
             for param in parameters:
                 if param.get("in") == "body" and "$ref" in param.get("schema", {}):
                     ref_name = param["schema"]["$ref"].split("/")[-1]
                     used_definitions.add(ref_name)
+                    root_element_types.add(ref_name)
                     for media_type in consumes or ["application/xml", "application/json"]:
-                        ET.SubElement(request, "representation", mediaType=media_type, element=f"{XSD_PREFIX}:{ref_name}")
-                else:
-                    param_in = param.get("in")
+                        ET.SubElement(request, "representation", attrib={
+                            "mediaType": media_type,
+                            "element": f"{XSD_PREFIX}:{ref_name}"
+                        })
+                elif param.get("in") in ["query", "path", "header"]:
+                    style_map = {"query": "query", "path": "template", "header": "header"}
+                    style = style_map.get(param["in"], "query")
                     param_attrs = {
                         "name": param.get("name", "param"),
-                        "required": str(param.get("required", False)).lower()
+                        "required": str(param.get("required", False)).lower(),
+                        "style": style,
+                        "type": f"xs:{map_swagger_type_to_xsd(param.get('type'), param.get('format'))}"
                     }
-                    if param_in == "query":
-                        param_attrs["style"] = "query"
-                    elif param_in == "path":
-                        param_attrs["style"] = "template"
-                    elif param_in == "header":
-                        param_attrs["style"] = "header"
-                    else:
-                        continue
-                    if "type" in param:
-                        param_attrs["type"] = f"xs:{map_swagger_type_to_xsd(param['type'], param.get('format'))}"
-                    ET.SubElement(request, "param", param_attrs)
+                    ET.SubElement(request, "param", attrib=param_attrs)
 
-            for code, response_spec in method_spec.get("responses", {}).items():
-                response = ET.SubElement(method, "response", attrib={"status": code})
-                schema = response_spec.get("schema")
-                if not schema:
-                    continue
-
+            responses = method_spec.get("responses", {})
+            for code, response_spec in responses.items():
+                response_el = ET.SubElement(method, "response", attrib={"status": code})
+                schema_resp = response_spec.get("schema")
                 ref_name = None
-                if "$ref" in schema:
-                    ref_name = schema["$ref"].split("/")[-1]
-                elif schema.get("type") == "array" and "items" in schema and "$ref" in schema["items"]:
-                    ref_name = schema["items"]["$ref"].split("/")[-1]
-
+                if schema_resp:
+                    if "$ref" in schema_resp:
+                        ref_name = schema_resp["$ref"].split("/")[-1]
+                    elif schema_resp.get("type") == "array" and "items" in schema_resp and "$ref" in schema_resp["items"]:
+                        ref_name = schema_resp["items"]["$ref"].split("/")[-1]
                 if ref_name:
                     used_definitions.add(ref_name)
-                    for media_type in ["application/xml", "application/json"]:
-                        ET.SubElement(response, "representation", attrib={
+                    root_element_types.add(ref_name)
+                    produces = method_spec.get("produces", ["application/xml", "application/json"])
+                    for media_type in produces:
+                        ET.SubElement(response_el, "representation", attrib={
                             "mediaType": media_type,
                             "element": f"{XSD_PREFIX}:{ref_name}"
                         })
                 else:
-                    for media_type in ["application/xml", "application/json"]:
-                        ET.SubElement(response, "representation", attrib={
-                            "mediaType": media_type
-                        })
+                    for media_type in method_spec.get("produces", ["application/xml", "application/json"]):
+                        ET.SubElement(response_el, "representation", attrib={"mediaType": media_type})
 
-    output_file = os.path.join(output_dir, f"{swagger_filename}.wadl")
-    with open(output_file, "w") as f:
+    wadl_filename = os.path.join(output_dir, f"{swagger_filename}.wadl")
+    with open(wadl_filename, "w") as f:
         f.write(prettify_xml(application))
 
-    return output_file
+    return wadl_filename, root_element_types
 
 def main():
     parser = argparse.ArgumentParser(description="Convert Swagger 2.0 JSON to WADL + XSD.")
@@ -311,16 +301,19 @@ def main():
         swagger = json.load(f)
 
     definitions = swagger.get("definitions", {})
-    
-    # 💡 Nuovo step: raccoglie tutti i tipi usati nel WADL
+
+    # Passaggio 1: raccoglie tutti i tipi usati (anche profondamente)
     used_definitions = collect_used_definitions_from_wadl(swagger, definitions)
 
-    # Ora che abbiamo tutto ciò che serve, generiamo XSD e WADL
-    xsd_filename = generate_xsd(definitions, used_definitions, args.output_dir, args.swagger_file)
-    wadl_filename = generate_wadl(swagger, definitions, xsd_filename, args.output_dir, args.swagger_file)
+    # Passaggio 2: genera WADL e ottiene anche i root_elements usati direttamente come elementi globali
+    xsd_filename = None  # inizializza per sicurezza
+    wadl_filename, root_elements = generate_wadl(swagger, definitions, None, args.output_dir, args.swagger_file)
 
-    print(f"Generated XSD: {xsd_filename}")
+    # Passaggio 3: genera XSD con info su quali definizioni sono usate e quali sono root
+    xsd_filename = generate_xsd(definitions, used_definitions, root_elements, args.output_dir, args.swagger_file)
+
     print(f"Generated WADL: {wadl_filename}")
+    print(f"Generated XSD : {xsd_filename}")
 
 if __name__ == "__main__":
     main()
