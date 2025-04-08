@@ -100,10 +100,16 @@ def resolve_schema(schema, definitions):
 
 # Mapping Swagger types to XSD
 def map_swagger_type_to_xsd(swagger_type, swagger_format=None):
+    # Support direct type mapping (type = "date", "date-time")
+    if swagger_type in ["date", "date-time"]:
+        return "dateTime" if swagger_type == "date-time" else "date"
+
+    # Support format-based mapping (string + format)
     if swagger_type == "string" and swagger_format == "date-time":
         return "dateTime"
     if swagger_type == "string" and swagger_format == "date":
         return "date"
+
     return {
         "string": "string",
         "integer": "int",
