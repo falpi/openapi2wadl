@@ -1,4 +1,3 @@
-
 # swagger2wadl.py
 # Author: ChatGPT (with user's collaboration)
 # Purpose: Convert a Swagger 2.0 (JSON format) file into a WADL file and related XSD.
@@ -6,14 +5,15 @@
 # - Extracts Swagger definitions to build the XSD schema
 # - Generates a WADL file that references the XSD via namespace and include
 # - Supports pretty-printed XML output and command line usage
-# - Supports array types, date/date-time formats
-# - Includes request parameters in the WADL <request> with appropriate representations
+# - Supports array types, date/date-time formats, string restrictions (minLength, maxLength, pattern), and parameters including headers
+# - Includes body parameters in the WADL <request> with appropriate representations
 
 import json
 import os
 import argparse
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
+from pathlib import Path
 
 # Namespace constants
 XSD_NAMESPACE = "http://www.w3.org/2001/XMLSchema"
@@ -47,7 +47,7 @@ def map_swagger_type_to_xsd(swagger_type, swagger_format=None):
         "number": "decimal"
     }.get(swagger_type, "string")
 
-def generate_xsd(definitions, used_definitions):
+def generate_xsd(definitions, used_definitions, output_dir, swagger_file):
     schema = ET.Element(f"{{{XSD_NAMESPACE}}}schema", attrib={
         "targetNamespace": XSD_TARGET_NAMESPACE,
         "elementFormDefault": "unqualified",
@@ -134,15 +134,23 @@ def generate_xsd(definitions, used_definitions):
             "type": f"{XSD_PREFIX}:{type_name}"
         })
 
-    return schema
+    # Determine output file name based on input Swagger file name
+    swagger_filename =  Path(swagger_file).stem
+    output_file = os.path.join(output_dir, f"{swagger_filename}.xsd")
+    with open(output_file, "w") as f:
+        f.write(prettify_xml(schema))
 
-def generate_wadl(swagger, definitions, xsd_filename):
+    return output_file
+
+def generate_wadl(swagger, definitions, xsd_filename, output_dir, swagger_file):
     application = ET.Element(f"{{{WADL_NAMESPACE}}}application", attrib={
         f"xmlns:{XSD_PREFIX}": XSD_TARGET_NAMESPACE,
         "xmlns:xs": XSD_NAMESPACE
     })
     grammars = ET.SubElement(application, "grammars")
-    ET.SubElement(grammars, "include", href=xsd_filename)
+    
+    swagger_filename =  Path(swagger_file).stem    
+    ET.SubElement(grammars, "include", href=f"{Path(swagger_file).stem}.xsd")
 
     resources = ET.SubElement(application, "resources", base=swagger.get("host", "http://localhost") + swagger.get("basePath", "/"))
     used_definitions = set()
@@ -192,46 +200,19 @@ def generate_wadl(swagger, definitions, xsd_filename):
                     for media_type in ["application/xml", "application/json"]:
                         ET.SubElement(response, "representation", mediaType=media_type, element=f"{XSD_PREFIX}:{ref_name}")
 
-    return application, used_definitions
+    # Determine WADL output filename based on Swagger input
+    swagger_filename =  Path(swagger_file).stem
+    output_file = os.path.join(output_dir, f"{swagger_filename}.wadl")
+    with open(output_file, "w") as f:
+        f.write(prettify_xml(application))
 
-def main():
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Convert Swagger 2.0 JSON to WADL and XSD")
-    parser.add_argument("swagger_file", help="Path to the Swagger JSON file")
-    parser.add_argument("output_wadl", help="Path to save the generated WADL file")
-    parser.add_argument("output_xsd", help="Path to save the generated XSD file")
-    args = parser.parse_args()
-
-    # Load Swagger JSON
-    with open(args.swagger_file, "r") as f:
-        swagger = json.load(f)
-
-    definitions = parse_swagger(swagger)
-    used_definitions = set()
-
-    # Generate XSD schema
-    xsd = generate_xsd(definitions, used_definitions)
-    xsd_str = prettify_xml(xsd)
-
-    # Write the XSD file
-    with open(args.output_xsd, "w") as f:
-        f.write(xsd_str)
-
-    # Generate WADL file
-    wadl, used_definitions = generate_wadl(swagger, definitions, args.output_xsd)
-    wadl_str = prettify_xml(wadl)
-
-    # Write the WADL file
-    with open(args.output_wadl, "w") as f:
-        f.write(wadl_str)
-
-    print(f"WADL and XSD files have been generated: {args.output_wadl}, {args.output_xsd}")
+    return output_file
 
 # Main function to execute the conversion
 def main():
     parser = argparse.ArgumentParser(description="Convert Swagger JSON to WADL and XSD.")
     parser.add_argument("swagger_file", help="Path to the Swagger JSON file")
-    parser.add_argument("output_dir", help="Directory to save WADL and XSD files")
+    parser.add_argument("output_dir", help="Directory to save WADL and XSD files", nargs="?", default="")  # Optional output dir
     args = parser.parse_args()
 
     # Load Swagger JSON
@@ -240,22 +221,14 @@ def main():
 
     # Parse definitions from Swagger
     definitions = parse_swagger(swagger)
-    
+
     # Generate XSD file
-    xsd_filename = os.path.join(args.output_dir, "swagger.xsd")
-    schema = generate_xsd(definitions, definitions.keys())
-    with open(xsd_filename, "w") as f:
-        f.write(prettify_xml(schema))
+    xsd_filename = generate_xsd(definitions, definitions.keys(), args.output_dir, args.swagger_file)
+    print(f"Generated XSD: {xsd_filename}")
 
     # Generate WADL file
-    wadl_filename = os.path.join(args.output_dir, "swagger.wadl")
-    application, used_definitions = generate_wadl(swagger, definitions, "swagger.xsd")
-    with open(wadl_filename, "w") as f:
-        f.write(prettify_xml(application))
-
+    wadl_filename = generate_wadl(swagger, definitions, xsd_filename, args.output_dir, args.swagger_file)
     print(f"Generated WADL: {wadl_filename}")
-    print(f"Generated XSD: {xsd_filename}")
 
 if __name__ == "__main__":
     main()
-    
