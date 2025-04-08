@@ -1,14 +1,3 @@
-
-# swagger2wadl.py
-# Author: ChatGPT (with user's collaboration)
-# Purpose: Convert a Swagger 2.0 (JSON format) file into a WADL file and related XSD.
-# Features:
-# - Extracts Swagger definitions to build the XSD schema
-# - Generates a WADL file that references the XSD via namespace and include
-# - Supports pretty-printed XML output and command line usage
-# - Supports array types, date/date-time formats
-# - Includes request parameters in the WADL <request> with appropriate representations
-
 import json
 import os
 import argparse
@@ -27,235 +16,183 @@ ET.register_namespace("", WADL_NAMESPACE)
 ET.register_namespace(XSD_PREFIX, XSD_TARGET_NAMESPACE)
 
 def prettify_xml(elem):
+    """
+    Makes the XML output indented and human-readable.
+    """
     rough_string = ET.tostring(elem, 'utf-8')
     reparsed = minidom.parseString(rough_string)
     return reparsed.toprettyxml(indent="  ")
 
 def parse_swagger(swagger):
-    return swagger.get("definitions", {})
+    """
+    Extracts the 'definitions' section from the Swagger JSON.
+    """
+    definitions = swagger.get("definitions", {})
+    return definitions
 
-# Mapping Swagger types to XSD
-def map_swagger_type_to_xsd(swagger_type, swagger_format=None):
-    if swagger_type == "string" and swagger_format == "date-time":
-        return "dateTime"
-    if swagger_type == "string" and swagger_format == "date":
-        return "date"
-    return {
+def map_swagger_type_to_xsd(swagger_type):
+    """
+    Mappa i tipi di Swagger ai tipi XSD corrispondenti.
+
+    Parametri:
+    swagger_type (str): Tipo di dato in Swagger.
+
+    Ritorna:
+    str: Tipo XSD corrispondente.
+    """
+    tipo_mapping = {
         "string": "string",
         "integer": "int",
         "boolean": "boolean",
-        "number": "decimal"
-    }.get(swagger_type, "string")
+        "number": "decimal",
+        "date": "date",        # Nuova mappatura per 'date'
+        "date-time": "dateTime",  # Nuova mappatura per 'date-time'
+        "array": "sequence"     # Gestione per 'array'
+    }
+    return tipo_mapping.get(swagger_type, "string")
 
-def generate_xsd(definitions, used_definitions):
+def generate_xsd(definitions):
+    """
+    Converts Swagger definitions to an XSD schema.
+
+    Parameters:
+    definitions (dict): Swagger model definitions
+
+    Returns:
+    xml.etree.ElementTree.Element: Root XML element of the schema
+    """
     schema = ET.Element(f"{{{XSD_NAMESPACE}}}schema", attrib={
         "targetNamespace": XSD_TARGET_NAMESPACE,
         "elementFormDefault": "unqualified",
         f"xmlns:{XSD_PREFIX}": XSD_TARGET_NAMESPACE
     })
 
-    complex_types = []
-    element_defs = []
-
     for def_name, def_body in definitions.items():
-        is_used = def_name in used_definitions
+        # Create a global element for each top-level type
+        ET.SubElement(schema, f"{{{XSD_NAMESPACE}}}element", attrib={
+            "name": def_name,
+            "type": f"{XSD_PREFIX}:{def_name}"
+        })
 
-        if not is_used:
-            complex_types.append(ET.Comment(f"unused type: {def_name}"))
-
-        complex_type = ET.Element(f"{{{XSD_NAMESPACE}}}complexType", name=def_name)
+        # Create the corresponding complex type
+        complex_type = ET.SubElement(schema, f"{{{XSD_NAMESPACE}}}complexType", name=def_name)
         sequence = ET.SubElement(complex_type, f"{{{XSD_NAMESPACE}}}sequence")
+
         required_fields = def_body.get("required", [])
         properties = def_body.get("properties", {})
 
         for prop_name, prop_attrs in properties.items():
             swagger_type = prop_attrs.get("type")
-            swagger_format = prop_attrs.get("format")
-
+            
+            # Gestione degli array con un complexType inline
             if swagger_type == "array":
-                items = prop_attrs.get("items", {})
-                item_type = map_swagger_type_to_xsd(items.get("type"), items.get("format"))
-                wrapper_el = ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
+                # Assumiamo che l'array contenga un tipo di oggetto (definito da un "$ref" o tipo primitivo)
+                items_type = prop_attrs.get("items", {}).get("type", "string")
+                xsd_items_type = map_swagger_type_to_xsd(items_type)
+
+                # Creiamo un complexType inline per l'array
+                array_complex_type = ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
                     "name": prop_name,
-                    "minOccurs": "1" if prop_name in required_fields else "0"
+                    "minOccurs": "0" if prop_name not in required_fields else "1"
                 })
-                complex_el = ET.SubElement(wrapper_el, f"{{{XSD_NAMESPACE}}}complexType")
-                array_seq = ET.SubElement(complex_el, f"{{{XSD_NAMESPACE}}}sequence")
-                ET.SubElement(array_seq, f"{{{XSD_NAMESPACE}}}element", attrib={
+                inline_complex_type = ET.SubElement(array_complex_type, f"{{{XSD_NAMESPACE}}}complexType")
+                array_sequence = ET.SubElement(inline_complex_type, f"{{{XSD_NAMESPACE}}}sequence")
+                ET.SubElement(array_sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
                     "name": "item",
-                    "type": f"xs:{item_type}",
-                    "minOccurs": "0",
-                    "maxOccurs": "unbounded"
+                    "type": f"xs:{xsd_items_type}",
+                    "maxOccurs": "unbounded"  # L'array può contenere un numero illimitato di elementi
                 })
-
-            elif swagger_type == "string" and swagger_format in ["date", "date-time"]:
-                xsd_type = map_swagger_type_to_xsd(swagger_type, swagger_format)
-                ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
-                    "name": prop_name,
-                    "type": f"xs:{xsd_type}",
-                    "minOccurs": "1" if prop_name in required_fields else "0"
-                })
-
-            elif swagger_type == "string" and any(k in prop_attrs for k in ["minLength", "maxLength", "pattern"]):
-                el = ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
-                    "name": prop_name,
-                    "minOccurs": "1" if prop_name in required_fields else "0"
-                })
-                simple_type = ET.SubElement(el, f"{{{XSD_NAMESPACE}}}simpleType")
-                restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", attrib={
-                    "base": "xs:string"
-                })
-                if "minLength" in prop_attrs:
-                    ET.SubElement(restriction, f"{{{XSD_NAMESPACE}}}minLength", value=str(prop_attrs["minLength"]))
-                if "maxLength" in prop_attrs:
-                    ET.SubElement(restriction, f"{{{XSD_NAMESPACE}}}maxLength", value=str(prop_attrs["maxLength"]))
-                if "pattern" in prop_attrs:
-                    ET.SubElement(restriction, f"{{{XSD_NAMESPACE}}}pattern", value=prop_attrs["pattern"])
-
             else:
-                xsd_type = map_swagger_type_to_xsd(swagger_type, swagger_format)
+                xsd_type = map_swagger_type_to_xsd(swagger_type)
                 ET.SubElement(sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
                     "name": prop_name,
                     "type": f"xs:{xsd_type}",
                     "minOccurs": "1" if prop_name in required_fields else "0"
                 })
-
-        complex_types.append(complex_type)
-
-        if is_used:
-            element_defs.append((def_name, def_name))
-
-    for complex_type in complex_types:
-        schema.append(complex_type)
-
-    for def_name, type_name in element_defs:
-        ET.SubElement(schema, f"{{{XSD_NAMESPACE}}}element", attrib={
-            "name": def_name,
-            "type": f"{XSD_PREFIX}:{type_name}"
-        })
 
     return schema
 
 def generate_wadl(swagger, definitions, xsd_filename):
-    application = ET.Element(f"{{{WADL_NAMESPACE}}}application", attrib={
-        f"xmlns:{XSD_PREFIX}": XSD_TARGET_NAMESPACE,
-        "xmlns:xs": XSD_NAMESPACE
-    })
+    """
+    Generates a WADL XML structure from a Swagger object and XSD reference.
+
+    Parameters:
+    swagger (dict): Parsed Swagger JSON
+    definitions (dict): Swagger definitions
+    xsd_filename (str): Filename of the associated XSD schema
+
+    Returns:
+    xml.etree.ElementTree.Element: Root WADL XML element
+    """
+    application = ET.Element(f"{{{WADL_NAMESPACE}}}application")
+
+    # Grammars section referencing the XSD
     grammars = ET.SubElement(application, "grammars")
     ET.SubElement(grammars, "include", href=xsd_filename)
 
+    # Add declaration for namespace "tns"
+    application.set(f"xmlns:{XSD_PREFIX}", XSD_TARGET_NAMESPACE)
+
+    # Create the resources section
     resources = ET.SubElement(application, "resources", base=swagger.get("host", "http://localhost") + swagger.get("basePath", "/"))
-    used_definitions = set()
 
     paths = swagger.get("paths", {})
     for path, methods in paths.items():
         resource = ET.SubElement(resources, "resource", path=path)
         for method_name, method_spec in methods.items():
             method = ET.SubElement(resource, "method", name=method_name.upper())
-
-            request = None
-            for param in method_spec.get("parameters", []):
-                if request is None:
-                    request = ET.SubElement(method, "request")
-
-                if param.get("in") == "body" and "$ref" in param.get("schema", {}):
-                    ref_name = param["schema"]["$ref"].split("/")[-1]
-                    used_definitions.add(ref_name)
-                    for media_type in ["application/xml", "application/json"]:
-                        ET.SubElement(request, "representation", mediaType=media_type, element=f"{XSD_PREFIX}:{ref_name}")
-                else:
-                    param_in = param.get("in")
-                    param_attrs = {
-                        "name": param.get("name", "param"),
-                        "required": str(param.get("required", False)).lower()
-                    }
-                    if param_in == "query":
-                        param_attrs["style"] = "query"
-                    elif param_in == "path":
-                        param_attrs["style"] = "template"
-                    elif param_in == "header":
-                        param_attrs["style"] = "header"
-                    else:
-                        continue
-                    if "type" in param:
-                        param_attrs["type"] = f"xs:{map_swagger_type_to_xsd(param['type'], param.get('format'))}"
-                    ET.SubElement(request, "param", param_attrs)
-
             response = ET.SubElement(method, "response")
+
+            # Add representations for each response type
             for code, response_spec in method_spec.get("responses", {}).items():
-                schema = response_spec.get("schema")
-                if not schema:
-                    continue
-                if "$ref" in schema:
-                    ref_name = schema["$ref"].split("/")[-1]
-                    used_definitions.add(ref_name)
+                schema_ref = response_spec.get("schema", {}).get("$ref")
+                if schema_ref:
+                    ref_name = schema_ref.split("/")[-1]
                     for media_type in ["application/xml", "application/json"]:
                         ET.SubElement(response, "representation", mediaType=media_type, element=f"{XSD_PREFIX}:{ref_name}")
 
-    return application, used_definitions
+    return application
+
+def save_pretty_xml(element, filename):
+    """
+    Saves an XML element to a file with indentation.
+
+    Parameters:
+    element (Element): The XML root element
+    filename (str): Output file path
+    """
+    pretty_xml = prettify_xml(element)
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(pretty_xml)
 
 def main():
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Convert Swagger 2.0 JSON to WADL and XSD")
+    """
+    Main entry point for the command-line script. Handles parsing input
+    arguments, loading the Swagger file, generating the XSD and WADL,
+    and writing the resulting files.
+    """
+    parser = argparse.ArgumentParser(description="Convert Swagger 2.0 JSON to WADL + XSD.")
     parser.add_argument("swagger_file", help="Path to the Swagger JSON file")
-    parser.add_argument("output_wadl", help="Path to save the generated WADL file")
-    parser.add_argument("output_xsd", help="Path to save the generated XSD file")
+    parser.add_argument("--output-dir", default=".", help="Directory to save WADL and XSD files (default: current folder)")
     args = parser.parse_args()
 
-    # Load Swagger JSON
-    with open(args.swagger_file, "r") as f:
+    swagger_filename = os.path.splitext(os.path.basename(args.swagger_file))[0]
+    wadl_filename = f"{swagger_filename}.wadl"
+    xsd_filename = f"{swagger_filename}.xsd"
+
+    # Load the Swagger file
+    with open(args.swagger_file, "r", encoding="utf-8") as f:
         swagger = json.load(f)
 
     definitions = parse_swagger(swagger)
-    used_definitions = set()
+    xsd = generate_xsd(definitions)
+    wadl = generate_wadl(swagger, definitions, xsd_filename)
 
-    # Generate XSD schema
-    xsd = generate_xsd(definitions, used_definitions)
-    xsd_str = prettify_xml(xsd)
+    # Save the XML files
+    save_pretty_xml(xsd, os.path.join(args.output_dir, xsd_filename))
+    save_pretty_xml(wadl, os.path.join(args.output_dir, wadl_filename))
 
-    # Write the XSD file
-    with open(args.output_xsd, "w") as f:
-        f.write(xsd_str)
-
-    # Generate WADL file
-    wadl, used_definitions = generate_wadl(swagger, definitions, args.output_xsd)
-    wadl_str = prettify_xml(wadl)
-
-    # Write the WADL file
-    with open(args.output_wadl, "w") as f:
-        f.write(wadl_str)
-
-    print(f"WADL and XSD files have been generated: {args.output_wadl}, {args.output_xsd}")
-
-# Main function to execute the conversion
-def main():
-    parser = argparse.ArgumentParser(description="Convert Swagger JSON to WADL and XSD.")
-    parser.add_argument("swagger_file", help="Path to the Swagger JSON file")
-    parser.add_argument("output_dir", help="Directory to save WADL and XSD files")
-    args = parser.parse_args()
-
-    # Load Swagger JSON
-    with open(args.swagger_file, "r") as f:
-        swagger = json.load(f)
-
-    # Parse definitions from Swagger
-    definitions = parse_swagger(swagger)
-    
-    # Generate XSD file
-    xsd_filename = os.path.join(args.output_dir, "swagger.xsd")
-    schema = generate_xsd(definitions, definitions.keys())
-    with open(xsd_filename, "w") as f:
-        f.write(prettify_xml(schema))
-
-    # Generate WADL file
-    wadl_filename = os.path.join(args.output_dir, "swagger.wadl")
-    application, used_definitions = generate_wadl(swagger, definitions, "swagger.xsd")
-    with open(wadl_filename, "w") as f:
-        f.write(prettify_xml(application))
-
-    print(f"Generated WADL: {wadl_filename}")
-    print(f"Generated XSD: {xsd_filename}")
+    print(f"Generated files:\n- {xsd_filename}\n- {wadl_filename}")
 
 if __name__ == "__main__":
     main()
-    
