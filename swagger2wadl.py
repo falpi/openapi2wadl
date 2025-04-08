@@ -189,16 +189,30 @@ def generate_wadl(swagger, definitions, xsd_filename, output_dir, swagger_file):
                         param_attrs["type"] = f"xs:{map_swagger_type_to_xsd(param['type'], param.get('format'))}"
                     ET.SubElement(request, "param", param_attrs)
 
-            response = ET.SubElement(method, "response")
             for code, response_spec in method_spec.get("responses", {}).items():
+                response = ET.SubElement(method, "response", attrib={"status": code})
                 schema = response_spec.get("schema")
                 if not schema:
                     continue
+
+                ref_name = None
                 if "$ref" in schema:
                     ref_name = schema["$ref"].split("/")[-1]
+                elif schema.get("type") == "array" and "items" in schema and "$ref" in schema["items"]:
+                    ref_name = schema["items"]["$ref"].split("/")[-1]
+
+                if ref_name:
                     used_definitions.add(ref_name)
                     for media_type in ["application/xml", "application/json"]:
-                        ET.SubElement(response, "representation", mediaType=media_type, element=f"{XSD_PREFIX}:{ref_name}")
+                        ET.SubElement(response, "representation", attrib={
+                            "mediaType": media_type,
+                            "element": f"{XSD_PREFIX}:{ref_name}"
+                        })
+                else:
+                    for media_type in ["application/xml", "application/json"]:
+                        ET.SubElement(response, "representation", attrib={
+                            "mediaType": media_type
+                        })
 
     # Determine WADL output filename based on Swagger input
     swagger_filename =  Path(swagger_file).stem
