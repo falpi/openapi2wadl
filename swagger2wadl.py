@@ -338,25 +338,27 @@ def main():
     parser.add_argument("--output-dir", help="Output directory", default=".")
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    try:
+        os.makedirs(args.output_dir, exist_ok=True)
 
-    with open(args.swagger_file, "r") as f:
-        swagger = json.load(f)
+        with open(args.swagger_file, "r") as f:
+            swagger = json.load(f)
 
-    definitions = swagger.get("definitions", {})
+        definitions = swagger.get("definitions", {})
+        used_definitions = collect_used_definitions_from_wadl(swagger, definitions)
+        wadl_filename, root_elements = generate_wadl(swagger, definitions, None, args.output_dir, args.swagger_file)
+        xsd_filename = generate_xsd(definitions, used_definitions, root_elements, args.output_dir, args.swagger_file)
 
-    # Passaggio 1: raccoglie tutti i tipi usati (anche profondamente)
-    used_definitions = collect_used_definitions_from_wadl(swagger, definitions)
+        print(f"Generated WADL: {wadl_filename}")
+        print(f"Generated XSD : {xsd_filename}")
 
-    # Passaggio 2: genera WADL e ottiene anche i root_elements usati direttamente come elementi globali
-    xsd_filename = None  # inizializza per sicurezza
-    wadl_filename, root_elements = generate_wadl(swagger, definitions, None, args.output_dir, args.swagger_file)
-
-    # Passaggio 3: genera XSD con info su quali definizioni sono usate e quali sono root
-    xsd_filename = generate_xsd(definitions, used_definitions, root_elements, args.output_dir, args.swagger_file)
-
-    print(f"Generated WADL: {wadl_filename}")
-    print(f"Generated XSD : {xsd_filename}")
+    except ValueError as ve:
+        print(f"ERROR: {ve}")
+        exit(1)
+    except Exception as ex:
+        print("An unexpected error occurred:")
+        print(ex)
+        exit(2)
 
 if __name__ == "__main__":
     main()
