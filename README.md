@@ -2,51 +2,80 @@
 
 Swagger 2.0 to WADL + XSD Converter
 
-This Python script converts a Swagger 2.0 (OpenAPI) JSON file into a WADL file and a corresponding XSD schema file. The output includes proper namespace handling, support for both `application/xml` and `application/json`, and is formatted with pretty-printed XML.
+This tool converts a **Swagger 2.0 (OpenAPI)** JSON specification into:
 
-## Features
+- a **WADL** (Web Application Description Language) file
+- an associated **XSD** (XML Schema Definition)
 
-- Parses Swagger 2.0 JSON files
-- Generates an XSD schema from Swagger model definitions
-- Produces a WADL file referencing the generated XSD
-- Adds XML namespace and prefix declarations correctly (`tns`)
-- Includes both XML and JSON representations in responses
-- Pretty-printed XML for readability
-- CLI-friendly
+It is designed to support accurate and schema-compliant transformations suitable for XML-based integrations and legacy systems.
 
-## Requirements
+---
 
-- Python 3.6+
+## 🚀 Features
 
-No additional external libraries are required—this script uses only the Python standard library.
+### ✅ WADL Generation
+- Generates `<application>` WADL document referencing grammar (XSD)
+- Supports all HTTP methods (`GET`, `POST`, etc.)
+- Maps:
+  - **path parameters** → `style="template"`
+  - **query parameters** → `style="query"`
+  - **headers** → `style="header"`
+- Supports **request body** with `$ref` and content types (`consumes`)
+- Supports **multiple responses per method**, including:
+  - Different `status` codes
+  - Each with multiple media types (`produces`)
+- Response element references included as `<representation element="tns:Type">`
 
-## Usage
+### ✅ XSD Schema Generation
+- Generates an XSD file from `definitions` in Swagger
+- Converts Swagger types and formats to correct XSD types
+- Supports:
+  - `string`, `integer`, `boolean`, `number`
+  - `date`, `date-time` (both native types and via `format`)
+- Correctly maps `array` with item type (including nested `$ref`)
+- Inline object types supported inside properties
+- Generates `xs:restriction` with:
+  - `minLength`, `maxLength`, `pattern` for `string`
+  - `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` for `number` and `integer`
+- Generates only `<xs:element>` declarations that are referenced in WADL (requests/responses)
+- Unused complex types are commented with `<!-- unused type: TypeName -->`
+- Pretty-printed XML output
+
+---
+
+## ⚠ Limitations
+
+- ❌ `multipleOf` restriction is **not supported** and will raise an error
+- ❌ Swagger 2.0 composition keywords (`allOf`, `anyOf`, `oneOf`) are **not supported**
+- ⚠ Recursive `$ref` structures are not resolved (to avoid infinite loops)
+- ⚠ Documentation fields like `description` are not (yet) included in XSD annotations
+- Only Swagger 2.0 JSON format is supported (not YAML or OpenAPI 3.x)
+
+---
+
+## 💡 Usage
 
 ```bash
-python swagger2wadl.py path/to/swagger.json
+python swagger2wadl.py my-api-swagger.json --output-dir output/
 ```
 
-Optional output directory:
+If `--output-dir` is not specified, files will be saved to the current directory.
 
-```bash
-python swagger2wadl.py path/to/swagger.json --output-dir path/to/output
-```
+This will generate:
 
-The script will generate two files in the specified (or current) folder:
+- `my-api-swagger.wadl`
+- `my-api-swagger.xsd`
 
-- `swagger.xsd`: XSD schema with complex types and global elements
-- `swagger.wadl`: WADL file referencing the XSD and modeling paths, methods, and responses
+---
 
-## Output Conventions
+## 📂 File Naming
 
-- Each Swagger definition creates:
-  - A global XSD element (referenced in the WADL)
-  - A complexType with properties based on `required` fields and data types
-- WADL `representation` elements reference the corresponding global element using the `tns` prefix
-- Namespace handling is consistent and aligned across both files
+- The generated WADL and XSD files are named based on the original Swagger file name.
+- The `<include href="...">` in WADL uses the base filename only (no path).
 
-## Limitations
+---
 
-- Only Swagger 2.0 JSON format is currently supported
-- Nested and recursive definitions are not deeply resolved
-- Limited to basic Swagger types (string, integer, boolean, number)
+## 🔧 Error Handling
+
+- Clean error messages for unsupported features (e.g., `multipleOf`)
+- Only the error text is printed (no Python traceback) for clarity
