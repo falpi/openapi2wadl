@@ -28,8 +28,8 @@ def prettify_xml(elem):
     fixed = re.sub(r'name="([A-Za-z0-9_]+)(\s+)"', r'name="\1"\2', pretty)
 
     # Sposta in fondo minOccurs e maxOccurs
-    fixed = re.sub(r'\<(.*\s)(minOccurs="[^"]*")\s(.*)\/>', r'<\1\3 \2/>', fixed)
-    fixed = re.sub(r'\<(.*\s)(maxOccurs="[^"]*")\s(.*)\/>', r'<\1\3 \2/>', fixed)
+    fixed = re.sub(r'<(.+?)(?=\sminOccurs)(\sminOccurs="[^"]*")([^\/|>]*)(\/)?>', r'<\1\3\2\4>', fixed)
+    fixed = re.sub(r'<(.+?)(?=\smaxOccurs)(\smaxOccurs="[^"]*")([^\/|>]*)(\/)?>', r'<\1\3\2\4>', fixed)
 
     return fixed
 
