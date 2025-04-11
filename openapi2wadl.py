@@ -18,13 +18,6 @@ ET.register_namespace("xs", XSD_NAMESPACE)
 ET.register_namespace("", WADL_NAMESPACE)
 ET.register_namespace(XSD_PREFIX, XSD_TARGET_NAMESPACE)
 
-import re
-from xml.dom import minidom
-
-import re
-from xml.dom import minidom
-import xml.etree.ElementTree as ET
-
 def prettify_xml(elem):
     """Return a pretty-printed XML string with corrected name attribute spacing."""
     rough_string = ET.tostring(elem, 'utf-8')
@@ -33,6 +26,11 @@ def prettify_xml(elem):
 
     # Correggi solo gli attributi name con spazi interni
     fixed = re.sub(r'name="([A-Za-z0-9_]+)(\s+)"', r'name="\1"\2', pretty)
+
+    # Sposta in fondo minOccurs e maxOccurs
+    fixed = re.sub(r'\<(.*\s)(minOccurs="[^"]*")\s(.*)\/>', r'<\1\3 \2/>', fixed)
+    fixed = re.sub(r'\<(.*\s)(maxOccurs="[^"]*")\s(.*)\/>', r'<\1\3 \2/>', fixed)
+
     return fixed
 
 def detect_version(spec):
