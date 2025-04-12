@@ -89,10 +89,11 @@ def extract_used_definitions(spec, version, root_definitions):
             for prop in schema.get("properties", {}).values():
                 visit_schema(prop)
 
-    # Analizza tutti i path del WADL 
-    if version == "swagger2":
-        for path, methods in spec.get("paths", {}).items():
-            for method_spec in methods.values():
+    # Analizza tutti i path 
+    for path, methods in spec.get("paths", {}).items():
+        for method_spec in methods.values():
+        
+            if version == "swagger2":
                 # Request body
                 for param in method_spec.get("parameters", []):
                     if param.get("in") == "body" and "schema" in param:
@@ -101,8 +102,17 @@ def extract_used_definitions(spec, version, root_definitions):
                 for response in method_spec.get("responses", {}).values():
                     if "schema" in response:
                         visit_schema(response["schema"])
-
-    #if version == "openapi3":
+                        
+            if version == "openapi3":
+                # Request body
+                for content in method_spec.get("requestBody",{}).get("content", {}).values():
+                    if "schema" in content:
+                       visit_schema(content["schema"])
+                        
+                # Responses
+                for response in method_spec.get("responses", {}).values():
+                    for content in response.get("content", {}).values():
+                        visit_schema(content["schema"])
 
     return used
     
