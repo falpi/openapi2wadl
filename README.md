@@ -1,5 +1,5 @@
-# `openapi2wadl.py` : OpenAPI 3.0 / Swagger 2.0 to WADL+XSD
-<p align="center">A Python script to converts JSON OpenAPI 3.0 (or Swagger 2.0) specifications into WADL and XSD files.<br/>Supports a wide set of constructs and preserves detailed data types in the generated XSD schema.</p>
+# `openapi2wadl.py` : OpenAPI to WADL+XSD
+<div id="user-content-toc" align="center"><ul><summary><p align="center">Python script to converts JSON OpenAPI 3.0 (or Swagger 2.0) specifications into WADL and XSD files.<br/>Supports a wide set of constructs and preserves detailed data types in the generated XSD schema.</p></summary></ul></div>
 
 ---
 
