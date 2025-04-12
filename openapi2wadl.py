@@ -2,6 +2,10 @@
 # openapi2wadl.py
 # Converts Swagger 2.0 or OpenAPI 3.0 into WADL + XSD
 
+# ####################################################################################################
+# Referenze
+# ####################################################################################################
+
 import os
 import re
 import json
@@ -9,20 +13,31 @@ import argparse
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
+# ####################################################################################################
+# Definizione dei namespace
+# ####################################################################################################
+
+XSD_PREFIX = "xsd"
 XSD_NAMESPACE = "http://www.w3.org/2001/XMLSchema"
+
+WADL_PREFIX = ""
 WADL_NAMESPACE = "http://wadl.dev.java.net/2009/02"
-XSD_TARGET_NAMESPACE = "http://example.com/schema"
-XSD_PREFIX = "tns"
 
-ET.register_namespace("xs", XSD_NAMESPACE)
-ET.register_namespace("", WADL_NAMESPACE)
-ET.register_namespace(XSD_PREFIX, XSD_TARGET_NAMESPACE)
+TARGET_PREFIX = "tns"
+TARGET_NAMESPACE = "http://example.com/schema"
 
-# Manipola gli XML dello XSD e WADL
+ET.register_namespace(XSD_PREFIX, XSD_NAMESPACE)
+ET.register_namespace(WADL_PREFIX, WADL_NAMESPACE)
+ET.register_namespace(TARGET_PREFIX, TARGET_NAMESPACE)
+
+# ####################################################################################################
+# Migliorare leggibilità xml
+# ####################################################################################################
 def prettify_xml(elem):
-    """Return a pretty-printed XML string with corrected name attribute spacing."""
+
     rough_string = ET.tostring(elem, 'utf-8')
     reparsed = minidom.parseString(rough_string)
+
     pretty = reparsed.toprettyxml(indent="  ")
 
     # Correggi solo gli attributi name con spazi interni
@@ -37,8 +52,11 @@ def prettify_xml(elem):
 
     return fixed
 
+# ####################################################################################################
 # Rileva la versione della specifica
+# ####################################################################################################
 def detect_version(spec):
+
     if "swagger" in spec and spec["swagger"] == "2.0":
         return "swagger2"
     elif "openapi" in spec and spec["openapi"].startswith("3."):
@@ -46,50 +64,53 @@ def detect_version(spec):
     else:
         raise ValueError("Unsupported OpenAPI/Swagger version")
 
-def extract_restrictions(props):
-    return {
-        k: props[k]
-        for k in [
-            "minLength", "maxLength", "pattern",
-            "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"
-        ] if k in props
-    }
-
-# Estrare la definizione dei tipi 
+# ####################################################################################################
+# Estrare la definizione dei tipi di primo livello
+# ####################################################################################################
 def extract_root_definitions(spec, version):
+
     if version == "swagger2":
         return spec.get("definitions", {})
     else:
         return spec.get("components", {}).get("schemas", {})
 
-# Determina tutti i tipi effettivamente utilizzati
+# ####################################################################################################
+# Estrae ricorsivamente le definizioni dei tipi referenziati in cascata a partire dai
+# tipi dell'interfaccia di request, inclusi quelli annidati via $ref in oggetti o array.
+# ####################################################################################################
 def extract_used_definitions(spec, version, root_definitions):
-    """
-    Analizza lo spec e raccoglie ricorsivamente tutti i nomi delle definizioni referenziate,
-    incluse quelle annidate via $ref in oggetti o array.
-    """
-    used = set()
 
+    used_definitions = set()
+
+    # ================================================================================================
+    # Support function
+    # ================================================================================================
     def visit_schema(schema):
+        
         if not isinstance(schema, dict):
             return
-        # Caso diretto: $ref
+            
+        # Caso $ref
         if "$ref" in schema:
-            ref_name = schema["$ref"].split("/")[-1]
-            if ref_name not in used:
-                used.add(ref_name)
-                ref_def = root_definitions.get(ref_name)
-                if ref_def:
-                    visit_schema(ref_def)  # Ricorsione sul tipo referenziato
+            type_name = schema["$ref"].split("/")[-1]
+            if type_name not in used_definitions:
+                used_definitions.add(type_name)
+                type_def = root_definitions.get(type_name)
+                if type_def:
+                    visit_schema(type_def)  # Ricorsione sul tipo referenziato
+                    
         # Caso array
         elif schema.get("type") == "array" and "items" in schema:
             visit_schema(schema["items"])
+            
         # Caso oggetto inline
         elif schema.get("type") == "object":
-            for prop in schema.get("properties", {}).values():
-                visit_schema(prop)
+            for properties in schema.get("properties", {}).values():
+                visit_schema(properties)
 
-    # Analizza tutti i path 
+    # ================================================================================================
+    # Function body
+    # ================================================================================================
     for path, methods in spec.get("paths", {}).items():
         for method_spec in methods.values():
         
@@ -106,46 +127,52 @@ def extract_used_definitions(spec, version, root_definitions):
             if version == "openapi3":
                 # Request body
                 for content in method_spec.get("requestBody",{}).get("content", {}).values():
-                    if "schema" in content:
-                       visit_schema(content["schema"])
+                    visit_schema(content["schema"])
                         
                 # Responses
                 for response in method_spec.get("responses", {}).values():
                     for content in response.get("content", {}).values():
                         visit_schema(content["schema"])
 
-    return used
+    return used_definitions    
+
+# ####################################################################################################
+# Acquisce le restrizioni dalle proprietà dal swagger/openapi
+# ####################################################################################################
+def get_restrictions(properties):
+    return {
+        k: properties[k]
+        for k in [
+            "minLength", "maxLength", "pattern",
+            "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"
+        ] if k in properties
+    }
     
-def apply_restrictions(restriction_elem, restrictions):
+# ####################################################################################################
+# Esegue mapping delle restrizioni da swagger/openapi a XSD
+# ####################################################################################################
+def map_restrictions(element, restrictions):
+
     if "minLength" in restrictions:
-        ET.SubElement(restriction_elem, f"{{{XSD_NAMESPACE}}}minLength", value=str(restrictions["minLength"]))
+        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}minLength", value=str(restrictions["minLength"]))
     if "maxLength" in restrictions:
-        ET.SubElement(restriction_elem, f"{{{XSD_NAMESPACE}}}maxLength", value=str(restrictions["maxLength"]))
+        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}maxLength", value=str(restrictions["maxLength"]))
     if "pattern" in restrictions:
-        ET.SubElement(restriction_elem, f"{{{XSD_NAMESPACE}}}pattern", value=restrictions["pattern"])
+        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}pattern", value=restrictions["pattern"])
     if "minimum" in restrictions:
-        ET.SubElement(restriction_elem, f"{{{XSD_NAMESPACE}}}minInclusive", value=str(restrictions["minimum"]))
+        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}minInclusive", value=str(restrictions["minimum"]))
     if "maximum" in restrictions:
-        ET.SubElement(restriction_elem, f"{{{XSD_NAMESPACE}}}maxInclusive", value=str(restrictions["maximum"]))
+        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}maxInclusive", value=str(restrictions["maximum"]))
     if "exclusiveMinimum" in restrictions:
-        ET.SubElement(restriction_elem, f"{{{XSD_NAMESPACE}}}minExclusive", value=str(restrictions["exclusiveMinimum"]))
+        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}minExclusive", value=str(restrictions["exclusiveMinimum"]))
     if "exclusiveMaximum" in restrictions:
-        ET.SubElement(restriction_elem, f"{{{XSD_NAMESPACE}}}maxExclusive", value=str(restrictions["exclusiveMaximum"]))
+        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}maxExclusive", value=str(restrictions["exclusiveMaximum"]))
 
-def map_integer_type_with_special_case(swagger_type, swagger_format, restrictions):
-    if swagger_type == "integer":
-        min_ = restrictions.get("minimum")
-        max_ = restrictions.get("maximum")
+# ####################################################################################################
+# Esegue mapping dei tipi supportati da swagger/openapi a XSD
+# ####################################################################################################
+def map_supported_types(swagger_type, swagger_format=None):
 
-        if min_ == 0 and max_ == 2147483647:
-            return "nonNegativeInteger"
-        elif min_ == 1 and max_ == 2147483647:
-            return "positiveInteger"
-
-    return None  # fallback to manual restriction
-
-# Mapping Swagger types to XSD
-def map_swagger_type_to_xsd(swagger_type, swagger_format=None):
     # Support direct type mapping (type = "date", "date-time")
     if swagger_type in ["date", "date-time"]:
         return "dateTime" if swagger_type == "date-time" else "date"
@@ -163,7 +190,11 @@ def map_swagger_type_to_xsd(swagger_type, swagger_format=None):
         "number": "decimal"
     }.get(swagger_type, "string")
 
-def build_string_type_name(restrictions):
+# ####################################################################################################
+# Esegue mapping dele string con restrizioni da swagger/openapi a XSD
+# ####################################################################################################
+def map_string_types_with_restrictions(restrictions):
+
     min_len = restrictions.get("minLength", 0)
     max_len = restrictions.get("maxLength", "")
 
@@ -175,34 +206,57 @@ def build_string_type_name(restrictions):
         return f"string{min_len}to{max_len}Type"
     else:
         return f"string{min_len}to{max_len}Type"
-        
+
+# ####################################################################################################
+# Esegue mapping degli intger con restrizioni da swagger/openapi a XSD
+# ####################################################################################################
+def map_integer_types_with_restrictions(swagger_type, swagger_format, restrictions):
+
+    if swagger_type == "integer":
+        min_ = restrictions.get("minimum")
+        max_ = restrictions.get("maximum")
+
+        if min_ == 0 and max_ == 2147483647:
+            return "nonNegativeInteger"
+        elif min_ == 1 and max_ == 2147483647:
+            return "positiveInteger"
+
+    return None  # fallback to manual restriction
+
+# ####################################################################################################
+# Risolve ricorsivamente gli $ref, evitando loop infiniti e unendo le proprietà
+# ####################################################################################################       
 def resolve_ref(schema, root_definitions, seen=None):
-    """Risoluzione ricorsiva di $ref, evita cicli e unisce le proprietà."""
+
     if not isinstance(schema, dict):
         return schema
 
     if "$ref" in schema:
         ref = schema["$ref"]
-        ref_name = ref.split("/")[-1]
+        type_name = ref.split("/")[-1]
+        
         if seen is None:
             seen = set()
-        if ref_name in seen:
+            
+        if type_name in seen:
             return {}  # evitiamo loop
-        seen.add(ref_name)
+        seen.add(type_name)
 
-        resolved = root_definitions.get(ref_name, {}).copy()
+        resolved = root_definitions.get(type_name, {}).copy()
         nested = resolve_ref(resolved, root_definitions, seen)
         return {**nested, **schema}  # priorità a schema locale
 
     return schema
     
+# ####################################################################################################
 # Genera il file XSD
+# ####################################################################################################
 def generate_xsd(root_definitions,used_definitions,wadl_definitions):
 
     schema = ET.Element(f"{{{XSD_NAMESPACE}}}schema", attrib={
-        "targetNamespace": XSD_TARGET_NAMESPACE,
+        "targetNamespace": TARGET_NAMESPACE,
         "elementFormDefault": "unqualified",
-        f"xmlns:{XSD_PREFIX}": XSD_TARGET_NAMESPACE
+        f"xmlns:{TARGET_PREFIX}": TARGET_NAMESPACE
     })
 
     complex_types = []
@@ -228,7 +282,7 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
             prop_attrs = resolve_ref(prop_attrs, root_definitions)
             swagger_type = prop_attrs.get("type")
             swagger_format = prop_attrs.get("format")
-            restrictions = extract_restrictions(prop_attrs)
+            restrictions = get_restrictions(prop_attrs)
 
             if swagger_type == "array":
                 items = prop_attrs.get("items", {})
@@ -236,7 +290,7 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
 
                 item_type = items.get("type")
                 item_format = items.get("format")
-                item_restrictions = extract_restrictions(items)
+                item_restrictions = get_restrictions(items)
 
                 wrapper_attrib = {"name": prop_name}
                 if prop_name not in required_fields:
@@ -253,40 +307,40 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
 
                 if "$ref" in prop_attrs.get("items", {}):
                     ref_name = prop_attrs["items"]["$ref"].split("/")[-1]
-                    item_el.set("type", f"{XSD_PREFIX}:{ref_name}")
+                    item_el.set("type", f"{TARGET_PREFIX}:{ref_name}")
 
                 elif item_type:
-                    simplified = map_integer_type_with_special_case(item_type, item_format, item_restrictions)
+                    simplified = map_integer_types_with_restrictions(item_type, item_format, item_restrictions)
                     if simplified:
-                        item_el.set("type", f"xs:{simplified}")
+                        item_el.set("type", f"{XSD_PREFIX}:{simplified}")
                     elif item_type == "string" and ("minLength" in item_restrictions or "maxLength" in item_restrictions):
-                        type_name = build_string_type_name(item_restrictions)
-                        item_el.set("type", f"{XSD_PREFIX}:{type_name}")
+                        type_name = map_string_types_with_restrictions(item_restrictions)
+                        item_el.set("type", f"{TARGET_PREFIX}:{type_name}")
                         string_restriction_registry[type_name] = item_restrictions
                     elif item_restrictions:
                         simple_type = ET.SubElement(item_el, f"{{{XSD_NAMESPACE}}}simpleType")
                         restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction",
-                                                    base=f"xs:{map_swagger_type_to_xsd(item_type, item_format)}")
-                        apply_restrictions(restriction, item_restrictions)
+                                                    base=f"{XSD_PREFIX}:{map_supported_types(item_type, item_format)}")
+                        map_restrictions(restriction, item_restrictions)
                     else:
-                        item_el.set("type", f"xs:{map_swagger_type_to_xsd(item_type, item_format)}")
+                        item_el.set("type", f"{XSD_PREFIX}:{map_supported_types(item_type, item_format)}")
                         
             else:
                 base_attrib = {"name": prop_name}
-                simplified = map_integer_type_with_special_case(swagger_type, swagger_format, restrictions)
+                simplified = map_integer_types_with_restrictions(swagger_type, swagger_format, restrictions)
                 if simplified:
-                    base_attrib["type"] = f"xs:{simplified}"
+                    base_attrib["type"] = f"{XSD_PREFIX}:{simplified}"
                 elif swagger_type == "string" and ("minLength" in restrictions or "maxLength" in restrictions):
-                    type_name = build_string_type_name(restrictions)
-                    base_attrib["type"] = f"{XSD_PREFIX}:{type_name}"
+                    type_name = map_string_types_with_restrictions(restrictions)
+                    base_attrib["type"] = f"{TARGET_PREFIX}:{type_name}"
                     string_restriction_registry[type_name] = restrictions
                 elif "$ref" in prop_attrs:
                     ref_name = prop_attrs["$ref"].split("/")[-1]
-                    base_attrib["type"] = f"{XSD_PREFIX}:{ref_name}"
+                    base_attrib["type"] = f"{TARGET_PREFIX}:{ref_name}"
                 elif restrictions:
                     pass
                 else:
-                    base_attrib["type"] = f"xs:{map_swagger_type_to_xsd(swagger_type, swagger_format)}"
+                    base_attrib["type"] = f"{XSD_PREFIX}:{map_supported_types(swagger_type, swagger_format)}"
 
                 if "type" in base_attrib:
                     padding = max_name_len - len(prop_name)
@@ -297,8 +351,8 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
                 if restrictions and "type" not in base_attrib:
                     simple_type = ET.SubElement(el, f"{{{XSD_NAMESPACE}}}simpleType")
                     restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction",
-                                                base=f"xs:{map_swagger_type_to_xsd(swagger_type, swagger_format)}")
-                    apply_restrictions(restriction, restrictions)
+                                                base=f"{XSD_PREFIX}:{map_supported_types(swagger_type, swagger_format)}")
+                    map_restrictions(restriction, restrictions)
 
                 if prop_name not in required_fields:
                     el.attrib["minOccurs"] = "0"
@@ -314,7 +368,9 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
         if def_name in wadl_definitions:
             element_declarations.append(def_name)
 
-    # ~~~ SimpleTypes
+    # ================================================================================================
+    # Genera SimpleTypes
+    # ================================================================================================
     schema.append(ET.Comment("#" * 100))
     schema.append(ET.Comment(" SimpleTypes "))
     schema.append(ET.Comment("#" * 100))
@@ -328,11 +384,13 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
         if idx > 0:
             schema.append(ET.Comment(" ~~~~~~~~ "))
         simple_type = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name=type_name)
-        restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", base="xs:string")
-        apply_restrictions(restriction, restrictions)
+        restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:string")
+        map_restrictions(restriction, restrictions)
         schema.append(simple_type)
 
-    # ~~~ ComplexTypes
+    # ================================================================================================
+    # Genera ComplexTypes
+    # ================================================================================================
     schema.append(ET.Comment("#" * 100))
     schema.append(ET.Comment(" ComplexTypes "))
     schema.append(ET.Comment("#" * 100))
@@ -340,7 +398,9 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
     for ct in complex_types:
         schema.append(ct)
 
-    # ~~~ Elements
+    # ================================================================================================
+    # Genera Element
+    # ================================================================================================
     schema.append(ET.Comment("#" * 100))
     schema.append(ET.Comment(" Elements "))
     schema.append(ET.Comment("#" * 100))
@@ -348,60 +408,87 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
     for def_name in element_declarations:
         ET.SubElement(schema, f"{{{XSD_NAMESPACE}}}element", attrib={
             "name": def_name,
-            "type": f"{XSD_PREFIX}:{def_name}"
+            "type": f"{TARGET_PREFIX}:{def_name}"
         })
+
+    # ================================================================================================
 
     return schema
 
+# ####################################################################################################
+# Genera il file WADL
+# ####################################################################################################
 def generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename):
     
     application = ET.Element(f"{{{WADL_NAMESPACE}}}application", attrib={
-        "xmlns:xs": XSD_NAMESPACE,
-        f"xmlns:{XSD_PREFIX}": XSD_TARGET_NAMESPACE
+        f"xmlns:{XSD_PREFIX}": XSD_NAMESPACE,
+        f"xmlns:{TARGET_PREFIX}": TARGET_NAMESPACE
     })
     
-    # ~~~ Grammars
+    # ================================================================================================
+    # Genera Grammars
+    # ================================================================================================
     application.append(ET.Comment("#" * 100))
     application.append(ET.Comment(" Grammars "))
     application.append(ET.Comment("#" * 100))    
-    gram = ET.SubElement(application, "grammars")
-    ET.SubElement(gram, "include", href=os.path.basename(xsd_filename))
+    gram = ET.SubElement(application,f"{{{WADL_NAMESPACE}}}grammars")
+    ET.SubElement(gram,f"{{{WADL_NAMESPACE}}}include", href=os.path.basename(xsd_filename))
 
-    # ~~~ Resources
+    # ================================================================================================
+    # Genera Resources
+    # ================================================================================================
     application.append(ET.Comment("#" * 100))
     application.append(ET.Comment(" Resources "))
     application.append(ET.Comment("#" * 100))
-    resources = ET.SubElement(application, "resources", base=spec.get("servers", [{}])[0].get("url", "/") if version == "openapi3" else "")
+    resources = ET.SubElement(application,f"{{{WADL_NAMESPACE}}}resources", base=spec.get("servers", [{}])[0].get("url", "/") if version == "openapi3" else "")
+
+    # ================================================================================================
+    # Genera Resource
+    # ================================================================================================
 
     for idx, (path, methods) in enumerate(spec.get("paths", {}).items()):
+        
         if idx > 0:
            resources.append(ET.Comment(" ~~~~~~~~ "))
-        resource = ET.SubElement(resources, "resource", path=path)
+                
+        resource = ET.SubElement(resources,f"{{{WADL_NAMESPACE}}}resource", path=path)
+
+        # ------------------------------------------------------------------------------------------------
+        # Genera Method
+        # ------------------------------------------------------------------------------------------------
+        
         for method_name, method_def in methods.items():
+        
             operationId = method_def.get("operationId","")
             if operationId=="":
-                method = ET.SubElement(resource, "method", name=method_name.upper())
+                method = ET.SubElement(resource,f"{{{WADL_NAMESPACE}}}method", name=method_name.upper())
             else:
-                method = ET.SubElement(resource, "method", name=method_name.upper(),id=operationId)            
-            
-            request = ET.SubElement(method, "request")
-            parameters = method_def.get("parameters", [])
-            consumes = method_def.get("consumes", [])
+                method = ET.SubElement(resource,f"{{{WADL_NAMESPACE}}}method", name=method_name.upper(),id=operationId)            
+                        
+            # ------------------------------------------------------------------------------------------------
+            # Genera Request
+            # ------------------------------------------------------------------------------------------------
 
-            if version == "openapi3" and "requestBody" in method_def:
+            request = ET.SubElement(method,f"{{{WADL_NAMESPACE}}}request")
+
+            # Genera representation per i request body dell'openapi3
+            if (version == "openapi3") and ("requestBody" in method_def):
                 content = method_def["requestBody"].get("content", {})
                 for mt, body_def in content.items():
                     schema_ref = body_def.get("schema", {}).get("$ref")
                     if schema_ref:
                         type_name = schema_ref.split("/")[-1]
                         wadl_definitions.add(type_name)
-                        ET.SubElement(request, "representation", mediaType=mt, element=f"{XSD_PREFIX}:{type_name}")
+                        ET.SubElement(request,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt, element=f"{TARGET_PREFIX}:{type_name}")                        
+
+            # Genera parameters ed eventuali representation per i request body del swagger2, mappando i style da swagger/openapi3 a WADL
+            consumes = method_def.get("consumes", [])
+            parameters = method_def.get("parameters", [])
 
             for param in parameters:
                 param_name = param["name"]
                 param_in = param.get("in", "query")
                 
-                # Fix: mapping Swagger "in" to WADL "style"
                 if param_in == "path":
                     param_style = "template"
                 elif param_in in ["query", "header", "matrix"]:
@@ -410,30 +497,41 @@ def generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename):
                     type_name = param["schema"]["$ref"].split("/")[-1]
                     for mt in consumes:
                         wadl_definitions.add(type_name)
-                        ET.SubElement(request, "representation", mediaType=mt, element=f"{XSD_PREFIX}:{type_name}")
+                        ET.SubElement(request,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt, element=f"{TARGET_PREFIX}:{type_name}")
                     continue
                 else:
                     continue  # Unsupported param location
 
-                param_type = map_swagger_type_to_xsd(param.get("type", "string"), param.get("format"))
-                ET.SubElement(request, "param", name=param_name, style=param_style, type=f"xs:{param_type}", required=str(param.get("required", False)).lower())
+                param_type = map_supported_types(param.get("type", "string"), param.get("format"))
+                ET.SubElement(request,f"{{{WADL_NAMESPACE}}}param", name=param_name, style=param_style, type=f"{XSD_PREFIX}:{param_type}", required=str(param.get("required", False)).lower())
+
+            # ------------------------------------------------------------------------------------------------
+            # Gestisce Responses
+            # ------------------------------------------------------------------------------------------------
 
             responses = method_def.get("responses", {})
+            
             for status, response in responses.items():
-                response_el = ET.SubElement(method, "response", status=status)
+                response_el = ET.SubElement(method,f"{{{WADL_NAMESPACE}}}response", status=status)
                 contents = response.get("content", {}) if version == "openapi3" else {"application/json": response}
                 for mt, content_def in contents.items():
                     schema = content_def.get("schema", {})
                     if "$ref" in schema:
                         type_name = schema["$ref"].split("/")[-1]
                         wadl_definitions.add(type_name)
-                        ET.SubElement(response_el, "representation", mediaType=mt, element=f"{XSD_PREFIX}:{type_name}")
+                        ET.SubElement(response_el,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt, element=f"{TARGET_PREFIX}:{type_name}")
                     else:
-                        ET.SubElement(response_el, "representation", mediaType=mt)
+                        ET.SubElement(response_el,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt)
+
+    # ================================================================================================
 
     return application
 
+# ####################################################################################################
+# Main function
+# ####################################################################################################
 def main():
+
     parser = argparse.ArgumentParser(description="Convert Swagger 2.0 or OpenAPI 3.0 JSON to WADL + XSD")
     parser.add_argument("swagger_file", help="Path to Swagger/OpenAPI JSON file")
     parser.add_argument("--output-dir", default=".", help="Directory to save WADL and XSD files")
@@ -451,7 +549,7 @@ def main():
     # Rileva versione (Swagger/OpenApi2 o OpenApi 3)
     version = detect_version(spec)
     
-    # Prepara definizione tipi
+    # Censisce i tipi utilizzati a vario titolo
     wadl_definitions = set()
     root_definitions = extract_root_definitions(spec, version)
     used_definitions = extract_used_definitions(spec, version, root_definitions)
@@ -473,5 +571,8 @@ def main():
     print(f"Generated WADL: {wadl_filename}")
     print(f"Generated XSD: {xsd_filename}")
 
+# ####################################################################################################
+# Entry point
+# ####################################################################################################
 if __name__ == "__main__":
     main()
