@@ -1,81 +1,62 @@
-# swagger2wadl
-
-Swagger 2.0 to WADL + XSD Converter
-
-This tool converts a **Swagger 2.0 (OpenAPI)** JSON specification into:
-
-- a **WADL** (Web Application Description Language) file
-- an associated **XSD** (XML Schema Definition)
-
-It is designed to support accurate and schema-compliant transformations suitable for XML-based integrations and legacy systems.
+# `openapi2wadl.py` : OpenAPI 3.0 / Swagger 2.0 to WADL+XSD
+<p align="center">A Python script to converts JSON OpenAPI 3.0 (or Swagger 2.0) specifications into WADL and XSD files.<br/>Supports a wide set of constructs and preserves detailed data types in the generated XSD schema.</p>
 
 ---
 
 ## 🚀 Features
 
 ### ✅ WADL Generation
-- Generates `<application>` WADL document referencing grammar (XSD)
-- Supports all HTTP methods (`GET`, `POST`, etc.)
-- Maps:
-  - **path parameters** → `style="template"`
-  - **query parameters** → `style="query"`
-  - **headers** → `style="header"`
-- Supports **request body** with `$ref` and content types (`consumes`)
-- Supports **multiple responses per method**, including:
-  - Different `status` codes
-  - Each with multiple media types (`produces`)
-- Response element references included as `<representation element="tns:Type">`
+- Supports both Swagger 2.0 and OpenAPI 3.0 (auto-detected)
+- Generates WADL `<resources>`, `<resource>`, `<method>`, `<request>`, and `<response>`
+- Supports `produces` / `consumes` in Swagger and `content` in OpenAPI
+- Includes all declared media types in `<representation>`
+- Handles parameters of type `query`, `header`, `path`, and `body`
+- Resolves all `$ref` references for requests and responses
 
 ### ✅ XSD Schema Generation
-- Generates an XSD file from `definitions` in Swagger
-- Converts Swagger types and formats to correct XSD types
-- Supports:
-  - `string`, `integer`, `boolean`, `number`
-  - `date`, `date-time` (both native types and via `format`)
-- Correctly maps `array` with item type (including nested `$ref`)
-- Inline object types supported inside properties
-- Generates `xs:restriction` with:
-  - `minLength`, `maxLength`, `pattern` for `string`
-  - `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` for `number` and `integer`
-- Generates only `<xs:element>` declarations that are referenced in WADL (requests/responses)
-- Unused complex types are commented with `<!-- unused type: TypeName -->`
-- Pretty-printed XML output
+- Generates a comprehensive XML Schema (XSD) for definitions used in WADL.
+- Only types referenced in WADL are declared as global elements.
+- Supports array types with proper `<xs:sequence>` wrapping.
+- Inline object types and deeply nested `$ref` are fully resolved.
+- Enforces string restrictions:
+  - `minLength`, `maxLength`, `pattern`.
+- Enforces number restrictions:
+  - `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`.
+- Maps standard integer constraints:
+  - `min=0` → `xs:nonNegativeInteger`
+  - `min=1` → `xs:positiveInteger`
+- Consolidates recurring string restrictions into reusable named `simpleType`'s named according to length range, e.g. `string64Type`, `string32TypeNillable`
+- Improve human readabilityy:
+  - Custom pretty print.
+  - Aligns and indents `type` attributes for readability (padding applied)
+  - Organizes schema in three separated block `SimpleTypes`, `ComplexTypes`, `Elements`
+ 
+---
+
+## 🚫 Limitations
+
+- Unsupported numeric constraint: `multipleOf`
+- Composition constructs (`allOf`, `anyOf`, `oneOf`) are not yet supported
+- Recursive definitions are handled safely (no infinite loops), but without semantic merging
+- Schema `description` / `title` annotations are not included in WADL/XSD
 
 ---
 
-## ⚠ Limitations
-
-- ❌ `multipleOf` restriction is **not supported** and will raise an error
-- ❌ Swagger 2.0 composition keywords (`allOf`, `anyOf`, `oneOf`) are **not supported**
-- ⚠ Recursive `$ref` structures are not resolved (to avoid infinite loops)
-- ⚠ Documentation fields like `description` are not (yet) included in XSD annotations
-- Only Swagger 2.0 JSON format is supported (not YAML or OpenAPI 3.x)
-
----
-
-## 💡 Usage
+## 🛠️ Usage
 
 ```bash
-python swagger2wadl.py my-api-swagger.json --output-dir output/
+python openapi2wadl.py <input_file.json> [--output-dir <output_directory>]
 ```
 
-If `--output-dir` is not specified, files will be saved to the current directory.
-
-This will generate:
-
-- `my-api-swagger.wadl`
-- `my-api-swagger.xsd`
+- The output directory is **optional**; if not provided, files are saved in the current directory
+- Output files are named after the input JSON file:
+  - `<name>.wadl`
+  - `<name>.xsd`
 
 ---
 
-## 📂 File Naming
+## 📌 Recommendations
 
-- The generated WADL and XSD files are named based on the original Swagger file name.
-- The `<include href="...">` in WADL uses the base filename only (no path).
-
----
-
-## 🔧 Error Handling
-
-- Clean error messages for unsupported features (e.g., `multipleOf`)
-- Only the error text is printed (no Python traceback) for clarity
+- Use `$ref` for reusable components (under `definitions` or `components.schemas`)
+- Provide clear `produces` and `consumes` values or `content` entries for media type mapping
+- Avoid unsupported constraints like `multipleOf`
