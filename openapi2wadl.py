@@ -50,6 +50,9 @@ def prettify_xml(elem):
     # Sposta in fondo id su "method"
     fixed = re.sub(r'<(method)(\sid="[^"]*")([^\/|>]*)(\/)?>', r'<\1\3\2\4>', fixed)
 
+    # Rimuove eventuali spazi finali dell'elemento
+    fixed = re.sub(r'"\s*>', r'">', fixed)
+
     return fixed
 
 # ####################################################################################################
@@ -264,18 +267,14 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
     string_restriction_registry = {}
 
     for idx, (def_name, def_body) in enumerate(root_definitions.items()):
-    
-        def_body = resolve_ref(def_body, root_definitions)  # risolvi $ref se presente
-
+        def_body = resolve_ref(def_body, root_definitions)
         complex_type = ET.Element(f"{{{XSD_NAMESPACE}}}complexType", name=def_name)
         
         sequence = ET.SubElement(complex_type, f"{{{XSD_NAMESPACE}}}sequence")
         required_fields = def_body.get("required", [])
         properties = def_body.get("properties", {})
 
-        name_lengths = [
-            len(p) for p, a in properties.items() if a.get("type") != "array"
-        ]
+        name_lengths = [len(p) for p, a in properties.items() if a.get("type") != "array"]
         max_name_len = max(name_lengths or [0])
 
         for prop_name, prop_attrs in properties.items():
@@ -283,6 +282,7 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
             swagger_type = prop_attrs.get("type")
             swagger_format = prop_attrs.get("format")
             restrictions = get_restrictions(prop_attrs)
+            nullable = prop_attrs.get("nullable", False)
 
             if swagger_type == "array":
                 items = prop_attrs.get("items", {})
@@ -291,6 +291,7 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
                 item_type = items.get("type")
                 item_format = items.get("format")
                 item_restrictions = get_restrictions(items)
+                item_nullable = items.get("nullable", False)
 
                 wrapper_attrib = {"name": prop_name}
                 if prop_name not in required_fields:
@@ -300,13 +301,11 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
                 complex_array = ET.SubElement(wrapper_el, f"{{{XSD_NAMESPACE}}}complexType")
                 array_seq = ET.SubElement(complex_array, f"{{{XSD_NAMESPACE}}}sequence")
                 item_el = ET.SubElement(array_seq, f"{{{XSD_NAMESPACE}}}element", attrib={
-                    "name": "item",
-                    "minOccurs": "0",
-                    "maxOccurs": "unbounded"
+                    "name": "item", "minOccurs": "0", "maxOccurs": "unbounded"
                 })
 
-                if "$ref" in prop_attrs.get("items", {}):
-                    ref_name = prop_attrs["items"]["$ref"].split("/")[-1]
+                if "$ref" in items:
+                    ref_name = items["$ref"].split("/")[-1]
                     item_el.set("type", f"{TARGET_PREFIX}:{ref_name}")
 
                 elif item_type:
@@ -318,41 +317,65 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
                         item_el.set("type", f"{TARGET_PREFIX}:{type_name}")
                         string_restriction_registry[type_name] = item_restrictions
                     elif item_restrictions:
-                        simple_type = ET.SubElement(item_el, f"{{{XSD_NAMESPACE}}}simpleType")
-                        restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction",
-                                                    base=f"{XSD_PREFIX}:{map_supported_types(item_type, item_format)}")
-                        map_restrictions(restriction, item_restrictions)
+                        base_type = map_supported_types(item_type, item_format)
+                        if item_nullable:
+                            union_type = ET.SubElement(item_el, f"{{{XSD_NAMESPACE}}}simpleType")
+                            union = ET.SubElement(union_type, f"{{{XSD_NAMESPACE}}}union")
+                            inline = ET.SubElement(union, f"{{{XSD_NAMESPACE}}}simpleType")
+                            restriction = ET.SubElement(inline, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:{base_type}")
+                            map_restrictions(restriction, item_restrictions)
+                            union.set("memberTypes", f"{TARGET_PREFIX}:emptyStringType")
+                        else:
+                            simple_type = ET.SubElement(item_el, f"{{{XSD_NAMESPACE}}}simpleType")
+                            restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:{base_type}")
+                            map_restrictions(restriction, item_restrictions)
                     else:
                         item_el.set("type", f"{XSD_PREFIX}:{map_supported_types(item_type, item_format)}")
                         
             else:
                 base_attrib = {"name": prop_name}
                 simplified = map_integer_types_with_restrictions(swagger_type, swagger_format, restrictions)
+                has_restrictions = bool(restrictions)
+                base_type = None
+
                 if simplified:
-                    base_attrib["type"] = f"{XSD_PREFIX}:{simplified}"
+                    base_type = f"{XSD_PREFIX}:{simplified}"
                 elif swagger_type == "string" and ("minLength" in restrictions or "maxLength" in restrictions):
                     type_name = map_string_types_with_restrictions(restrictions)
-                    base_attrib["type"] = f"{TARGET_PREFIX}:{type_name}"
+                    base_type = f"{TARGET_PREFIX}:{type_name}"
                     string_restriction_registry[type_name] = restrictions
                 elif "$ref" in prop_attrs:
                     ref_name = prop_attrs["$ref"].split("/")[-1]
-                    base_attrib["type"] = f"{TARGET_PREFIX}:{ref_name}"
-                elif restrictions:
-                    pass
-                else:
-                    base_attrib["type"] = f"{XSD_PREFIX}:{map_supported_types(swagger_type, swagger_format)}"
+                    base_type = f"{TARGET_PREFIX}:{ref_name}"
+                elif not has_restrictions:
+                    base_type = f"{XSD_PREFIX}:{map_supported_types(swagger_type, swagger_format)}"
 
-                if "type" in base_attrib:
+                if "name" in base_attrib:
                     padding = max_name_len - len(prop_name)
                     base_attrib["name"] = prop_name + (" " * padding)
 
-                el = ET.Element(f"{{{XSD_NAMESPACE}}}element", attrib=base_attrib)
-
-                if restrictions and "type" not in base_attrib:
-                    simple_type = ET.SubElement(el, f"{{{XSD_NAMESPACE}}}simpleType")
-                    restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction",
-                                                base=f"{XSD_PREFIX}:{map_supported_types(swagger_type, swagger_format)}")
-                    map_restrictions(restriction, restrictions)
+                if base_type and not nullable:
+                    base_attrib["type"] = base_type
+                    el = ET.Element(f"{{{XSD_NAMESPACE}}}element", attrib=base_attrib)
+                elif base_type and nullable:
+                    el = ET.Element(f"{{{XSD_NAMESPACE}}}element", attrib={"name": base_attrib["name"]})
+                    union_type = ET.SubElement(el, f"{{{XSD_NAMESPACE}}}simpleType")
+                    union = ET.SubElement(union_type, f"{{{XSD_NAMESPACE}}}union", memberTypes=f"{base_type} {TARGET_PREFIX}:emptyStringType")
+                elif has_restrictions:
+                    el = ET.Element(f"{{{XSD_NAMESPACE}}}element", attrib={"name": base_attrib["name"]})
+                    if nullable:
+                        union_type = ET.SubElement(el, f"{{{XSD_NAMESPACE}}}simpleType")
+                        union = ET.SubElement(union_type, f"{{{XSD_NAMESPACE}}}union")
+                        inline = ET.SubElement(union, f"{{{XSD_NAMESPACE}}}simpleType")
+                        restriction = ET.SubElement(inline, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:{map_supported_types(swagger_type, swagger_format)}")
+                        map_restrictions(restriction, restrictions)
+                        union.set("memberTypes", f"{TARGET_PREFIX}:emptyStringType")
+                    else:
+                        simple_type = ET.SubElement(el, f"{{{XSD_NAMESPACE}}}simpleType")
+                        restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:{map_supported_types(swagger_type, swagger_format)}")
+                        map_restrictions(restriction, restrictions)
+                else:
+                    continue
 
                 if prop_name not in required_fields:
                     el.attrib["minOccurs"] = "0"
@@ -365,8 +388,21 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
             complex_types.append(ET.Comment(" ~~~~~~~~ "))
                 
         complex_types.append(complex_type)
+
         if def_name in wadl_definitions:
             element_declarations.append(def_name)
+
+    # ================================================================================================
+    # Genera special type for nullability
+    # ================================================================================================
+    schema.append(ET.Comment("#" * 100))
+    schema.append(ET.Comment(" EmptyStringType "))
+    schema.append(ET.Comment("#" * 100))
+
+    empty_string_type = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name="emptyStringType")
+    restr = ET.SubElement(empty_string_type, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:string")
+    ET.SubElement(restr, f"{{{XSD_NAMESPACE}}}length", value="0")
+    schema.append(empty_string_type)
 
     # ================================================================================================
     # Genera SimpleTypes
