@@ -28,7 +28,7 @@
   - `min=0` → `xs:nonNegativeInteger`
   - `min=1` → `xs:positiveInteger`
 - Consolidates recurring string restrictions into reusable named `simpleType`'s named according to length range, e.g. `string64Type`, `string32TypeNillable`
-- Improve human readabilityy:
+- Improve human readability:
   - Custom pretty print.
   - Aligns and indents `type` attributes for readability (padding applied)
   - Organizes schema in three separated block `SimpleTypes`, `ComplexTypes`, `Elements`
@@ -39,7 +39,6 @@
 
 - Unsupported numeric constraint: `multipleOf`
 - Composition constructs (`allOf`, `anyOf`, `oneOf`) are not yet supported
-- Recursive definitions are handled safely (no infinite loops), but without semantic merging
 - Schema `description` / `title` annotations are not included in WADL/XSD
 
 ---
