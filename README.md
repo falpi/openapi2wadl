@@ -51,8 +51,8 @@ python openapi2wadl.py <input_file.json> [--output-dir <output_directory>]
 
 - The output directory is **optional**; if not provided, files are saved in the current directory
 - Output files are named after the input JSON file:
-  - `<name>.wadl`
-  - `<name>.xsd`
+  - `<input_file>.wadl`
+  - `<input_file>.xsd`
 
 ---
 
