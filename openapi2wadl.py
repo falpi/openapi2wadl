@@ -252,14 +252,100 @@ def resolve_ref(schema, root_definitions, seen=None):
     return schema
 
 # ####################################################################################################
-# Genera complex Type
+# Genera ComplexType
 # ####################################################################################################
-def generate_xsd_type(item_element, item_properties, string_restriction_registry):
+def generate_xsd_type(level, parent_element, root_name, def_body, root_definitions, string_restriction_registry):
 
-    item_type = item_properties.get("type")
-    item_format = item_properties.get("format")
-    item_nullable = item_properties.get("nullable", False)    
-    item_restrictions = get_restrictions(item_properties)
+    # verifica se si tratta di un $ref
+    def_ref = def_body.get("$ref","");                    
+                    
+    # risolve eventuali $ref sullo schema body
+    def_body = resolve_ref(def_body, root_definitions)      
+
+    #  determina il tipo dello schema
+    def_type = def_body.get("type", "");    
+    
+    # se si tratta di un array esegue
+    if def_ref=="" and def_type == "array":
+                
+        # crea nodi per array
+        array_type = ET.SubElement(parent_element,f"{{{XSD_NAMESPACE}}}complexType")             
+        array_sequence = ET.SubElement(array_type, f"{{{XSD_NAMESPACE}}}sequence")
+        array_element = ET.SubElement(array_sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
+            "name": "item", "minOccurs": "0", "maxOccurs": "unbounded"
+        })
+        
+        # se è un nodo radice aggiunge l'attributo del nome
+        if (root_name!=""):
+           array_type.set("name",root_name)
+        
+        # genera definizione del tipo in modo ricorsivo
+        generate_xsd_type(level+1,array_element,"",def_body.get("items", {}),root_definitions,string_restriction_registry)               
+    
+    # se si tratta di un object esegue
+    elif def_ref=="" and def_type == "object":
+                         
+        # determina attributi accessori dell'object    
+        def_required = def_body.get("required", [])
+        def_properties = def_body.get("properties", {})
+
+        # determina padding per i type degli elementi
+        name_padding = max([len(p) for p, a in def_properties.items() if a.get("type") != "array"] or [0])
+           
+        # crea nodi per complex type
+        complex_type = ET.SubElement(parent_element,f"{{{XSD_NAMESPACE}}}complexType")             
+        sequence = ET.SubElement(complex_type, f"{{{XSD_NAMESPACE}}}sequence")
+
+        # se è un nodo radice aggiunge l'attributo del nome
+        if (root_name!=""):
+           complex_type.set("name",root_name)
+
+        # esegue un ciclo su tutte le proprietà del complex type
+        for prop_name, prop_attrs in def_properties.items():
+                        
+            # crea attributi per nodo 
+            element_attrib = {"name": prop_name}
+            
+            if prop_name not in def_required:
+                element_attrib["minOccurs"] = "0"
+
+            # verifica se si tratta di un $ref
+            prop_ref = prop_attrs.get("$ref","");                    
+                
+            # se si tratta di un tipo array o object esegue, altrimenti procede
+            if prop_ref=="" and prop_attrs.get("type") in ["array","object"]:
+                                                    
+                # crea nodo per elemento di tipo array
+                complex_element = ET.SubElement(sequence,f"{{{XSD_NAMESPACE}}}element", attrib=element_attrib)
+                
+                # genera definizione del tipo
+                generate_xsd_type(level+1,complex_element,"",prop_attrs,root_definitions,string_restriction_registry)
+                
+            else:
+            
+                # corregge nome elemento per introdurre padding
+                element_attrib["name"] = element_attrib["name"] + (" " * (name_padding-len(prop_name)))
+                    
+                # crea nodo per elemento semplice
+                simple_element = ET.SubElement(sequence,f"{{{XSD_NAMESPACE}}}element", attrib=element_attrib)
+                
+                # genera definizione del tipo
+                generate_xsd_simple_type(level,simple_element,prop_attrs,string_restriction_registry)                                
+
+    else:
+
+        # genera definizione del tipo
+        generate_xsd_simple_type(level,parent_element,def_body,string_restriction_registry)  
+    
+# ####################################################################################################
+# Genera Element/SimpleType
+# ####################################################################################################    
+def generate_xsd_simple_type(level,parent_element, prop_attrs, string_restriction_registry):
+    
+    item_type = prop_attrs.get("type")
+    item_format = prop_attrs.get("format")
+    item_nullable = prop_attrs.get("nullable", False)    
+    item_restrictions = get_restrictions(prop_attrs)
     
     base_type = None
     simplified_type = map_integer_types_with_restrictions(item_type, item_format, item_restrictions)
@@ -273,8 +359,8 @@ def generate_xsd_type(item_element, item_properties, string_restriction_registry
         base_type = f"{TARGET_PREFIX}:{type_name}"
         string_restriction_registry[type_name] = item_restrictions
         
-    elif "$ref" in item_properties:
-        ref_name = item_properties["$ref"].split("/")[-1]
+    elif "$ref" in prop_attrs:
+        ref_name = prop_attrs["$ref"].split("/")[-1]
         base_type = f"{TARGET_PREFIX}:{ref_name}"
         
     elif not item_restrictions:
@@ -282,23 +368,23 @@ def generate_xsd_type(item_element, item_properties, string_restriction_registry
 
     # crea il nodo xml appropriato al tipo dell'elemento
     if base_type and not item_nullable:
-        item_element.set('type',base_type)
+        parent_element.set('type',base_type)
         
     elif base_type and item_nullable:
-        union_type = ET.SubElement(item_element, f"{{{XSD_NAMESPACE}}}simpleType")
+        union_type = ET.SubElement(parent_element, f"{{{XSD_NAMESPACE}}}simpleType")
         union = ET.SubElement(union_type, f"{{{XSD_NAMESPACE}}}union", memberTypes=f"{base_type} {TARGET_PREFIX}:emptyStringType")
         
     elif item_restrictions:
             
         if item_nullable:
-            union_type = ET.SubElement(item_element, f"{{{XSD_NAMESPACE}}}simpleType")
+            union_type = ET.SubElement(parent_element, f"{{{XSD_NAMESPACE}}}simpleType")
             union = ET.SubElement(union_type, f"{{{XSD_NAMESPACE}}}union")
             inline = ET.SubElement(union, f"{{{XSD_NAMESPACE}}}simpleType")
             restriction = ET.SubElement(inline, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:{map_supported_types(item_type, item_format)}")
             map_restrictions(restriction, item_restrictions)
             union.set("memberTypes", f"{TARGET_PREFIX}:emptyStringType")
         else:
-            simple_type = ET.SubElement(item_element, f"{{{XSD_NAMESPACE}}}simpleType")
+            simple_type = ET.SubElement(parent_element, f"{{{XSD_NAMESPACE}}}simpleType")
             restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:{map_supported_types(item_type, item_format)}")
             map_restrictions(restriction, item_restrictions)
 
@@ -308,7 +394,7 @@ def generate_xsd_type(item_element, item_properties, string_restriction_registry
 def generate_xsd(root_definitions,used_definitions,wadl_definitions):
 
     # prepara variabili di lavoro
-    complex_types = []
+    complex_types = ET.Element("root")
     element_declarations = []
     string_restriction_registry = {}
 
@@ -319,78 +405,23 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
         f"xmlns:{TARGET_PREFIX}": TARGET_NAMESPACE
     })
 
+    # ================================================================================================
+    # Prepara tipi
+    # ================================================================================================
+
     # Esegue un ciclo su tutti i tipi definiti al primo livello del contract
     for idx, (def_name, def_body) in enumerate(root_definitions.items()):
-    
-        # acquisisce il body e gli attributi principali del tipo risolvendo eventuali $ref
-        def_body = resolve_ref(def_body, root_definitions)        
-        def_required = def_body.get("required", [])
-        def_properties = def_body.get("properties", {})
-
-        # determina padding per i type degli elementi
-        name_padding = max([len(p) for p, a in def_properties.items() if a.get("type") != "array"] or [0])
-        
-        # crea nodo per complex type
-        complex_type = ET.Element(f"{{{XSD_NAMESPACE}}}complexType", name=def_name)        
-        main_sequence = ET.SubElement(complex_type, f"{{{XSD_NAMESPACE}}}sequence")
-
-        # esegue un ciclo su tutte le proprietà del complex type
-        for prop_name, prop_attrs in def_properties.items():
-                        
-            # crea attributi per nodo 
-            element_attrib = {"name": prop_name}
-            
-            if prop_name not in def_required:
-                element_attrib["minOccurs"] = "0"
-
-            # acquisisce le proprietà del tipo risolvendo eventuali $ref
-            prop_attrs = resolve_ref(prop_attrs, root_definitions)
-
-            # se non si tratta di un tipo array esegue, altrimenti procede
-            if prop_attrs.get("type") != "array":
-            
-                # corregge nome elemento per introdurre padding
-                element_attrib["name"] = element_attrib["name"] + (" " * (name_padding-len(prop_name)))
-                    
-                # crea nodo per elemento semplice
-                item_element = ET.Element(f"{{{XSD_NAMESPACE}}}element", attrib=element_attrib)
-                
-                # genera definizione del tipo
-                generate_xsd_type(item_element,prop_attrs,string_restriction_registry)                
-                
-                # appende elemento alla sequence
-                main_sequence.append(item_element)
-                                        
-            else:
-            
-                # acquisisce le proprietà del tipo dell'array risolvendo eventuali $ref
-                prop_attrs = resolve_ref(prop_attrs.get("items", {}), root_definitions)
-                    
-                # crea nodo per elemento di tipo array
-                array_wrapper = ET.Element(f"{{{XSD_NAMESPACE}}}element", attrib=element_attrib)
-                array_type = ET.SubElement(array_wrapper, f"{{{XSD_NAMESPACE}}}complexType")
-                array_sequence = ET.SubElement(array_type, f"{{{XSD_NAMESPACE}}}sequence")
-                array_element = ET.SubElement(array_sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
-                    "name": "item", "minOccurs": "0", "maxOccurs": "unbounded"
-                })
-                
-                # genera definizione del tipo
-                generate_xsd_type(array_element,prop_attrs,string_restriction_registry)
-
-                # appende elemento alla sequence
-                main_sequence.append(array_wrapper)
-                
 
         # se necessario crea separatore tra i complex type
         if not def_name in used_definitions:
             complex_types.append(ET.Comment(f" #unused# "))
         elif idx > 0:
             complex_types.append(ET.Comment(" ~~~~~~~~ "))
-                
-        # aggiunge complex type al dom
-        complex_types.append(complex_type)
 
-        # se necessario crea separatore tra i complex type
+        # genera il prossimo complex type
+        generate_xsd_type(0,complex_types, def_name, def_body, root_definitions, string_restriction_registry)
+                            
+        # se il complex type è referenziato dal wadl 
         if def_name in wadl_definitions:
             element_declarations.append(def_name)
 
@@ -419,8 +450,10 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
     )
 
     for idx, (type_name, restrictions) in enumerate(sorted_simpletypes):
+    
         if idx > 0:
             schema.append(ET.Comment(" ~~~~~~~~ "))
+            
         simple_type = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name=type_name)
         restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:string")
         map_restrictions(restriction, restrictions)
@@ -433,8 +466,8 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
     schema.append(ET.Comment(" ComplexTypes "))
     schema.append(ET.Comment("#" * 100))
 
-    for ct in complex_types:
-        schema.append(ct)
+    for child in complex_types:
+       schema.append(child);
 
     # ================================================================================================
     # Genera Element
