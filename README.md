@@ -20,7 +20,7 @@
 - Supports array types with proper `<xs:sequence>` wrapping.
 - Only types referenced in WADL are declared as global elements.
 - Inline object types and deeply nested `$ref` are fully resolved.
-- Directly maps `required` property to `minOccurs="0|1"` XSD attribute
+- Directly maps `required` property to `minOccurs="0|1"` XSD attribute.
 - Support the following restriction tokens :
   - `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`.
 - Supports nullability in two different ways:
