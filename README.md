@@ -24,7 +24,7 @@
   - `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`.
 - Supports nullability in two different ways:
   - Directly maps `nullable` property to the `nillable` XSD attribute.
-  - Replace non-nullable atomic types with reusable special `simpleType` union between atomic type and the empty string.
+  - Replace not-nullable atomic types with reusable union `simpleType` that merge atomic type with empty string.
 - Consolidates recurring string length restrictions into reusable `simpleType`'s named and ordered according to length range (e.g. `string64Type`, `string32TypeNillable`) to improve readability and simplify detection of inappropriate or incomplete type definitions.
 - Improve human readability:
   - Custom pretty print.
