@@ -8,6 +8,7 @@
 
 import os
 import re
+import sys
 import json
 import argparse
 import xml.etree.ElementTree as ET
@@ -43,7 +44,8 @@ def prettify_xml(elem):
     # Correggi solo gli attributi name con spazi interni
     fixed = re.sub(r'name="([A-Za-z0-9_]+)(\s+)"', r'name="\1"\2', pretty)
 
-    # Sposta in fondo minOccurs e maxOccurs sugli "element"
+    # Sposta in fondo minOccurs, maxOccurs, nillable sugli "element"
+    fixed = re.sub(r'<(.+?)(?=\snillable)(\snillable="[^"]*")([^\/|>]*)(\/)?>', r'<\1\3\2\4>', fixed)
     fixed = re.sub(r'<(.+?)(?=\sminOccurs)(\sminOccurs="[^"]*")([^\/|>]*)(\/)?>', r'<\1\3\2\4>', fixed)
     fixed = re.sub(r'<(.+?)(?=\smaxOccurs)(\smaxOccurs="[^"]*")([^\/|>]*)(\/)?>', r'<\1\3\2\4>', fixed)
 
@@ -140,121 +142,197 @@ def extract_used_definitions(spec, version, root_definitions):
     return used_definitions    
 
 # ####################################################################################################
+# Risolve ricorsivamente gli $ref, evitando loop infiniti e unendo le proprietà
+# ####################################################################################################       
+def resolve_ref(schema, root_definitions, seen=None):
+
+    # se è un $ref esegue
+    if "$ref" in schema:
+    
+        # determina il tipo referenziato
+        type_name = schema.get("$ref").split("/")[-1]
+        
+        # se il controllo dei loop non è inizializzato provvede, altrimenti se il tipo è già stato visitato esce per evitare i loop
+        if seen is None:
+            seen = set()           
+        elif type_name in seen:
+            return {}  
+            
+        # aggiunge il tipo al controllo dei loop
+        seen.add(type_name)
+
+        # determina ricorsivamente il primo schema della catena nidificata di $ref
+        resolved = root_definitions.get(type_name, {}).copy()        
+        nested = resolve_ref(resolved, root_definitions, seen)
+        
+        # restituisce 
+        return {**nested, **schema}  # priorità a schema locale
+
+    # restisuisce immodificato lo schema in ingresso
+    return schema
+
+# ####################################################################################################
 # Acquisce le restrizioni dalle proprietà dal swagger/openapi
 # ####################################################################################################
-def get_restrictions(properties):
+def get_restrictions(schema):
     return {
-        k: properties[k]
-        for k in [
-            "minLength", "maxLength", "pattern",
-            "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"
-        ] if k in properties
+        k: schema[k]
+        for k in ["minLength", "maxLength", "pattern", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] if k in schema
     }
     
 # ####################################################################################################
 # Esegue mapping delle restrizioni da swagger/openapi a XSD
 # ####################################################################################################
-def map_restrictions(element, restrictions):
+def map_restrictions(element, schema):
 
-    if "minLength" in restrictions:
-        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}minLength", value=str(restrictions["minLength"]))
-    if "maxLength" in restrictions:
-        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}maxLength", value=str(restrictions["maxLength"]))
-    if "pattern" in restrictions:
-        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}pattern", value=restrictions["pattern"])
-    if "minimum" in restrictions:
-        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}minInclusive", value=str(restrictions["minimum"]))
-    if "maximum" in restrictions:
-        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}maxInclusive", value=str(restrictions["maximum"]))
-    if "exclusiveMinimum" in restrictions:
-        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}minExclusive", value=str(restrictions["exclusiveMinimum"]))
-    if "exclusiveMaximum" in restrictions:
-        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}maxExclusive", value=str(restrictions["exclusiveMaximum"]))
-
-# ####################################################################################################
-# Esegue mapping dei tipi supportati da swagger/openapi a XSD
-# ####################################################################################################
-def map_supported_types(swagger_type, swagger_format=None):
-
-    # Support direct type mapping (type = "date", "date-time")
-    if swagger_type in ["date", "date-time"]:
-        return "dateTime" if swagger_type == "date-time" else "date"
-
-    # Support format-based mapping (string + format)
-    if swagger_type == "string" and swagger_format == "date-time":
-        return "dateTime"
-    if swagger_type == "string" and swagger_format == "date":
-        return "date"
-
-    return {
-        "string": "string",
-        "integer": "int",
-        "boolean": "boolean",
-        "number": "decimal"
-    }.get(swagger_type, "string")
-
-# ####################################################################################################
-# Esegue mapping dele string con restrizioni da swagger/openapi a XSD
-# ####################################################################################################
-def map_string_types_with_restrictions(restrictions):
-
-    min_len = restrictions.get("minLength", 0)
-    max_len = restrictions.get("maxLength", "")
-
-    if min_len == 0: 
-        return f"string{max_len}TypeNillable"
-    elif min_len == 1 and isinstance(max_len, int):
-        return f"string{max_len}Type"
-    elif isinstance(min_len, int) and isinstance(max_len, int):
-        return f"string{min_len}to{max_len}Type"
-    else:
-        return f"string{min_len}to{max_len}Type"
-
-# ####################################################################################################
-# Esegue mapping degli intger con restrizioni da swagger/openapi a XSD
-# ####################################################################################################
-def map_integer_types_with_restrictions(swagger_type, swagger_format, restrictions):
-
-    if swagger_type == "integer":
-        min_ = restrictions.get("minimum")
-        max_ = restrictions.get("maximum")
-
-        if min_ == 0 and max_ == 2147483647:
-            return "nonNegativeInteger"
-        elif min_ == 1 and max_ == 2147483647:
-            return "positiveInteger"
-
-    return None  # fallback to manual restriction
-
-# ####################################################################################################
-# Risolve ricorsivamente gli $ref, evitando loop infiniti e unendo le proprietà
-# ####################################################################################################       
-def resolve_ref(schema, root_definitions, seen=None):
-
-    if not isinstance(schema, dict):
-        return schema
-
-    if "$ref" in schema:
-        ref = schema["$ref"]
-        type_name = ref.split("/")[-1]
+    if "pattern" in schema:
+        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}pattern", value=schema["pattern"])
         
-        if seen is None:
-            seen = set()
+    if "minLength" in schema:
+        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}minLength", value=str(schema["minLength"]))
+        
+    if "maxLength" in schema:
+        ET.SubElement(element, f"{{{XSD_NAMESPACE}}}maxLength", value=str(schema["maxLength"]))
+        
+    if "minimum" in schema:
+        if schema.get("exclusiveMinimum",False):
+            ET.SubElement(element, f"{{{XSD_NAMESPACE}}}minExclusive", value=str(schema["minimum"]))
+        else:
+            ET.SubElement(element, f"{{{XSD_NAMESPACE}}}minInclusive", value=str(schema["minimum"]))
+
+    if "maximum" in schema:
+        if schema.get("exclusiveMaximum",False):
+            ET.SubElement(element, f"{{{XSD_NAMESPACE}}}maxExclusive", value=str(schema["maximum"]))
+        else:
+            ET.SubElement(element, f"{{{XSD_NAMESPACE}}}maxInclusive", value=str(schema["maximum"]))
+
+# ####################################################################################################
+# Gestisce mapping della nullability dei tipi atomici
+# ####################################################################################################
+def map_xsd_nullability(schema, type_name, nullability_registry, restriction_registry):
+
+    type_nullable = schema.get("nullable",False)
+   
+    if not type_nullable:
+        return f"{XSD_PREFIX}:{type_name}"    
+    else:
+        schema.pop("nullable")
+        
+        if not type_name in nullability_registry:
+           simple_type = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name=f"{type_name}Nillable")
+           union = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}union", memberTypes=f"{XSD_PREFIX}:{type_name} {TARGET_PREFIX}:emptyString")
+           nullability_registry[type_name] = simple_type
+        
+        return f"{TARGET_PREFIX}:{type_name}Nillable"
+
+# ####################################################################################################
+# Esegue mapping dei tipi swagger/openapi a XSD
+# ####################################################################################################
+def map_xsd_types(schema, nullability_registry, restriction_registry):
+        
+    # acquisisce gli attributi del tipo
+    type_name = schema.get("type","")
+    type_format = schema.get("format","")
+    type_nullable = schema.get("nullable",False)
+    type_restrictions = get_restrictions(schema)
+        
+    # gestisce tipi boolean
+    if type_name == "boolean":
+       return map_xsd_nullability(schema,type_name,nullability_registry,restriction_registry)
+        
+    # gestisce tipi data nativi
+    if type_name in ["date", "date-time"] and type_format == "":    
+        return map_xsd_nullability(schema,"dateTime" if type_name == "date-time" else "date",nullability_registry,restriction_registry)
+
+    # gestisce fomati data stringa
+    if type_name == "string" and type_format in ["date", "date-time"]:
+        return map_xsd_nullability(schema,"dateTime" if type_format == "date-time" else "date",nullability_registry,restriction_registry)
+        
+    # gestisce tipi number
+    if type_name == "number" and type_format in ["","float","double"]:
+        return map_xsd_nullability(schema,"decimal" if type_format == "" else type_format,nullability_registry,restriction_registry)
+        
+    # gestisce tipi integer
+    if type_name == "integer" and type_format in ["","int32","int64"]:          
+        return map_xsd_nullability(schema,"integer" if type_format == "" else "int" if type_format == "int32" else "long",nullability_registry,restriction_registry)
+
+    # gestisce tipi byte
+    if type_name == "string" and type_format == "byte":
+       return map_xsd_nullability(schema,"base64Binary",nullability_registry,restriction_registry)
             
-        if type_name in seen:
-            return {}  # evitiamo loop
-        seen.add(type_name)
+    # gestisce tipi stringa
+    if type_name == "string":
+    
+        min_len = type_restrictions.get("minLength", 0)
+        max_len = type_restrictions.get("maxLength", "")
 
-        resolved = root_definitions.get(type_name, {}).copy()
-        nested = resolve_ref(resolved, root_definitions, seen)
-        return {**nested, **schema}  # priorità a schema locale
+        type_pre_part = "emptySting"  if max_len==0 else "openString" if not isinstance(max_len, int) else "string"       
+        type_end_part = "TypeNillable" if min_len==0 else "Type"
+        type_min_part = f"{min_len}" if isinstance(min_len, int) and min_len>1 else ""
+        type_max_part = f"{max_len}" if isinstance(max_len, int) and max_len>0 else ""
+        type_sep_part = "to" if type_min_part!="" and type_min_part!="" else ""  
+        
+        type_name = type_pre_part+type_min_part+type_sep_part+type_max_part+type_end_part
+            
+        if not type_name in restriction_registry:
+            restriction_registry[type_name] = dict(filter(lambda item: item[0] in {"minLength","maxLength"}, type_restrictions.items()))
 
-    return schema
+        schema.pop("minLength",None)
+        schema.pop("maxLength",None)
+
+        return f"{TARGET_PREFIX}:{type_name}"
+
+    # genera eccezione    
+    print("Unsupported type: ",schema)
+    sys.exit()
+
+    
+# ####################################################################################################
+# Genera Element/SimpleType
+# ####################################################################################################    
+def generate_xsd_simple_type(level, parent_element, schema, nullability_registry, restriction_registry):
+
+    # se si tratta di un ref lo gestisce ad hoc
+    if "$ref" in schema:
+        ref_name = schema["$ref"].split("/")[-1]
+        parent_element.set('type',f"{TARGET_PREFIX}:{ref_name}")
+        return
+
+    # se necessario aggiunge attributo di nullability
+    if schema.get("nullable", False):
+       parent_element.set('nillable',"true")    
+            
+    # determina il tipo xsd più appropriato 
+    mapped_type = map_xsd_types(schema,nullability_registry,restriction_registry)
+
+    # riacquisisce parametri tipo 
+    type_nullable = schema.get("nullable", False)    
+    type_restrictions = get_restrictions(schema)
+    
+    # crea il nodo xml appropriato al tipo dell'elemento
+    if not type_restrictions:
+    
+        if not type_nullable:
+            parent_element.set('type',mapped_type)
+        else:
+            simple_type = ET.SubElement(parent_element, f"{{{XSD_NAMESPACE}}}simpleType")
+            union = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}union", memberTypes=f"{mapped_type} {TARGET_PREFIX}:emptyString")    
+    
+    elif not type_nullable:
+        simple_type = ET.SubElement(parent_element, f"{{{XSD_NAMESPACE}}}simpleType")
+        restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", base=mapped_type)
+        map_restrictions(restriction, type_restrictions)
+    else:
+        simple_type = ET.SubElement(parent_element, f"{{{XSD_NAMESPACE}}}simpleType")
+        union = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}union", memberTypes=f"{TARGET_PREFIX}:emptyString")            
+        inline = ET.SubElement(union, f"{{{XSD_NAMESPACE}}}simpleType")
+        restriction = ET.SubElement(inline, f"{{{XSD_NAMESPACE}}}restriction", base=mapped_type)
+        map_restrictions(restriction, type_restrictions)
 
 # ####################################################################################################
 # Genera ComplexType
 # ####################################################################################################
-def generate_xsd_type(level, parent_element, root_name, def_body, root_definitions, string_restriction_registry):
+def generate_xsd_type(level, parent_element, root_name, def_body, root_definitions, nullability_registry, restriction_registry):
 
     # verifica se si tratta di un $ref
     def_ref = def_body.get("$ref","");                    
@@ -280,7 +358,7 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
            array_type.set("name",root_name)
         
         # genera definizione del tipo in modo ricorsivo
-        generate_xsd_type(level+1,array_element,"",def_body.get("items", {}),root_definitions,string_restriction_registry)               
+        generate_xsd_type(level+1,array_element,"",def_body.get("items", {}),root_definitions,nullability_registry,restriction_registry)               
     
     # se si tratta di un object esegue
     elif def_ref=="" and def_type == "object":
@@ -319,7 +397,7 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
                 complex_element = ET.SubElement(sequence,f"{{{XSD_NAMESPACE}}}element", attrib=element_attrib)
                 
                 # genera definizione del tipo
-                generate_xsd_type(level+1,complex_element,"",prop_attrs,root_definitions,string_restriction_registry)
+                generate_xsd_type(level+1,complex_element,"",prop_attrs,root_definitions,nullability_registry,restriction_registry)
                 
             else:
             
@@ -330,73 +408,21 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
                 simple_element = ET.SubElement(sequence,f"{{{XSD_NAMESPACE}}}element", attrib=element_attrib)
                 
                 # genera definizione del tipo
-                generate_xsd_simple_type(level,simple_element,prop_attrs,string_restriction_registry)                                
+                generate_xsd_simple_type(level,simple_element,prop_attrs,nullability_registry,restriction_registry)                                
 
     else:
 
         # genera definizione del tipo
-        generate_xsd_simple_type(level,parent_element,def_body,string_restriction_registry)  
-    
-# ####################################################################################################
-# Genera Element/SimpleType
-# ####################################################################################################    
-def generate_xsd_simple_type(level,parent_element, prop_attrs, string_restriction_registry):
-    
-    item_type = prop_attrs.get("type")
-    item_format = prop_attrs.get("format")
-    item_nullable = prop_attrs.get("nullable", False)    
-    item_restrictions = get_restrictions(prop_attrs)
-    
-    base_type = None
-    simplified_type = map_integer_types_with_restrictions(item_type, item_format, item_restrictions)
-    
-    # determina il tipo dell'elemento
-    if simplified_type:
-        base_type = f"{XSD_PREFIX}:{simplified_type}"
-        
-    elif item_type == "string" and ("minLength" in item_restrictions or "maxLength" in item_restrictions):
-        type_name = map_string_types_with_restrictions(item_restrictions)
-        base_type = f"{TARGET_PREFIX}:{type_name}"
-        string_restriction_registry[type_name] = item_restrictions
-        
-    elif "$ref" in prop_attrs:
-        ref_name = prop_attrs["$ref"].split("/")[-1]
-        base_type = f"{TARGET_PREFIX}:{ref_name}"
-        
-    elif not item_restrictions:
-        base_type = f"{XSD_PREFIX}:{map_supported_types(item_type, item_format)}"
-
-    # crea il nodo xml appropriato al tipo dell'elemento
-    if base_type and not item_nullable:
-        parent_element.set('type',base_type)
-        
-    elif base_type and item_nullable:
-        union_type = ET.SubElement(parent_element, f"{{{XSD_NAMESPACE}}}simpleType")
-        union = ET.SubElement(union_type, f"{{{XSD_NAMESPACE}}}union", memberTypes=f"{base_type} {TARGET_PREFIX}:emptyStringType")
-        
-    elif item_restrictions:
-            
-        if item_nullable:
-            union_type = ET.SubElement(parent_element, f"{{{XSD_NAMESPACE}}}simpleType")
-            union = ET.SubElement(union_type, f"{{{XSD_NAMESPACE}}}union")
-            inline = ET.SubElement(union, f"{{{XSD_NAMESPACE}}}simpleType")
-            restriction = ET.SubElement(inline, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:{map_supported_types(item_type, item_format)}")
-            map_restrictions(restriction, item_restrictions)
-            union.set("memberTypes", f"{TARGET_PREFIX}:emptyStringType")
-        else:
-            simple_type = ET.SubElement(parent_element, f"{{{XSD_NAMESPACE}}}simpleType")
-            restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:{map_supported_types(item_type, item_format)}")
-            map_restrictions(restriction, item_restrictions)
+        generate_xsd_simple_type(level,parent_element,def_body,nullability_registry,restriction_registry)  
 
 # ####################################################################################################
 # Genera il file XSD
 # ####################################################################################################
-def generate_xsd(root_definitions,used_definitions,wadl_definitions):
+def generate_xsd(root_definitions,used_definitions,wadl_definitions,nullability_registry,restriction_registry):
 
     # prepara variabili di lavoro
     complex_types = ET.Element("root")
     element_declarations = []
-    string_restriction_registry = {}
 
     # genera nodo radice dell'XSD
     schema = ET.Element(f"{{{XSD_NAMESPACE}}}schema", attrib={
@@ -419,33 +445,37 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
             complex_types.append(ET.Comment(" ~~~~~~~~ "))
 
         # genera il prossimo complex type
-        generate_xsd_type(0,complex_types, def_name, def_body, root_definitions, string_restriction_registry)
+        generate_xsd_type(0,complex_types, def_name, def_body, root_definitions, nullability_registry, restriction_registry)
                             
         # se il complex type è referenziato dal wadl 
         if def_name in wadl_definitions:
             element_declarations.append(def_name)
 
     # ================================================================================================
-    # Genera special type for nullability
+    # Genera Special Type 
     # ================================================================================================
     schema.append(ET.Comment("#" * 100))
-    schema.append(ET.Comment(" EmptyStringType "))
+    schema.append(ET.Comment(" Special Types for Nullability "))
     schema.append(ET.Comment("#" * 100))
 
-    empty_string_type = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name="emptyStringType")
-    restr = ET.SubElement(empty_string_type, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:string")
-    ET.SubElement(restr, f"{{{XSD_NAMESPACE}}}length", value="0")
-    schema.append(empty_string_type)
+    empty_string = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name="emptyString")
+    restriction = ET.SubElement(empty_string, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:string")
+    ET.SubElement(restriction, f"{{{XSD_NAMESPACE}}}length", value="0")
+    schema.append(empty_string)
+    
+    for element in nullability_registry.values():    
+        schema.append(ET.Comment(" ~~~~~~~~ "))
+        schema.append(element)
 
     # ================================================================================================
-    # Genera SimpleTypes
+    # Genera Simple Types
     # ================================================================================================
     schema.append(ET.Comment("#" * 100))
     schema.append(ET.Comment(" SimpleTypes "))
     schema.append(ET.Comment("#" * 100))
 
     sorted_simpletypes = sorted(
-        string_restriction_registry.items(),
+        restriction_registry.items(),
         key=lambda item: item[1].get("maxLength", float('inf'))
     )
 
@@ -460,7 +490,7 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
         schema.append(simple_type)
 
     # ================================================================================================
-    # Genera ComplexTypes
+    # Genera Complex Types
     # ================================================================================================
     schema.append(ET.Comment("#" * 100))
     schema.append(ET.Comment(" ComplexTypes "))
@@ -489,7 +519,7 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions):
 # ####################################################################################################
 # Genera il file WADL
 # ####################################################################################################
-def generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename):
+def generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename,nullability_registry,restriction_registry):
     
     application = ET.Element(f"{{{WADL_NAMESPACE}}}application", attrib={
         f"xmlns:{XSD_PREFIX}": XSD_NAMESPACE,
@@ -558,14 +588,15 @@ def generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename):
 
             for param in parameters:
                 param_name = param["name"]
+                param_schema = param.get("schema",{})
                 param_in = param.get("in", "query")
                 
                 if param_in == "path":
                     param_style = "template"
                 elif param_in in ["query", "header", "matrix"]:
                     param_style = param_in
-                elif version == "swagger2" and param_in=="body" and "$ref" in param.get("schema", {}):
-                    type_name = param["schema"]["$ref"].split("/")[-1]
+                elif version == "swagger2" and param_in=="body" and "$ref" in param_schema:
+                    type_name = param_schema["$ref"].split("/")[-1]
                     for mt in consumes:
                         wadl_definitions.add(type_name)
                         ET.SubElement(request,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt, element=f"{TARGET_PREFIX}:{type_name}")
@@ -573,8 +604,8 @@ def generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename):
                 else:
                     continue  # Unsupported param location
 
-                param_type = map_supported_types(param.get("type", "string"), param.get("format"))
-                ET.SubElement(request,f"{{{WADL_NAMESPACE}}}param", name=param_name, style=param_style, type=f"{XSD_PREFIX}:{param_type}", required=str(param.get("required", False)).lower())
+                param_type = map_xsd_types(param_schema,nullability_registry,restriction_registry)
+                ET.SubElement(request,f"{{{WADL_NAMESPACE}}}param", name=param_name, style=param_style, type=param_type, required=str(param.get("required", False)).lower())
 
             # ------------------------------------------------------------------------------------------------
             # Gestisce Responses
@@ -621,15 +652,18 @@ def main():
     version = detect_version(spec)
     
     # Censisce i tipi utilizzati a vario titolo
+    nullability_registry = {}
+    restriction_registry = {}
+
     wadl_definitions = set()
     root_definitions = extract_root_definitions(spec, version)
     used_definitions = extract_used_definitions(spec, version, root_definitions)
     
     # Generazione del WADL
-    wadl_tree = generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename)
+    wadl_tree = generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename,nullability_registry,restriction_registry)
 
     # Generazione XSD 
-    xsd_tree = generate_xsd(root_definitions,used_definitions,wadl_definitions)
+    xsd_tree = generate_xsd(root_definitions,used_definitions,wadl_definitions,nullability_registry,restriction_registry)
 
     # Scrittura file XSD
     with open(os.path.join(args.output_dir, xsd_filename), "w", encoding="utf-8") as f:
