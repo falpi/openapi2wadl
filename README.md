@@ -17,9 +17,8 @@
 
 ### ✅ XSD Schema Generation
 - Generates a comprehensive XML Schema (XSD).
-- Supports array types with proper `<xs:sequence>` wrapping.
-- Only types referenced in WADL are declared as global elements.
-- Inline object types and deeply nested `$ref` are fully resolved.
+- Nested `$ref` schema chains are fully resolved.
+- Nested arrays and/or objects chains are fully managed.
 - Directly maps `required` property to `minOccurs="0|1"` XSD attribute.
 - Support the following restriction tokens :
   - `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`.
@@ -29,6 +28,7 @@
 - Consolidates recurring string length restrictions into reusable `simpleType`'s named and ordered according to length range (e.g. `string64Type`, `string32TypeNillable`) to improve readability and simplify detection of inappropriate or incomplete type definitions.
 - Improve human readability:
   - Custom pretty print.
+  - Only types referenced in WADL are declared as global elements.
   - Aligns and indents `type` attributes for readability (padding applied).
   - Organizes schema in separated block `Special Types`, `Simple Types`, `Complex Types`, `Elements`.
 
