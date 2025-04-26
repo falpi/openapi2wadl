@@ -16,23 +16,40 @@
 - Resolves all `$ref` references for requests and responses
 
 ### ✅ XSD Schema Generation
-- Generates a comprehensive XML Schema (XSD) for definitions used in WADL.
-- Only types referenced in WADL are declared as global elements.
+- Generates a comprehensive XML Schema (XSD).
 - Supports array types with proper `<xs:sequence>` wrapping.
+- Only types referenced in WADL are declared as global elements.
 - Inline object types and deeply nested `$ref` are fully resolved.
-- Enforces string restrictions:
-  - `minLength`, `maxLength`, `pattern`.
-- Enforces number restrictions:
-  - `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`.
-- Maps standard integer constraints:
-  - `min=0` → `xs:nonNegativeInteger`
-  - `min=1` → `xs:positiveInteger`
-- Consolidates recurring string restrictions into reusable named `simpleType`'s named according to length range, e.g. `string64Type`, `string32TypeNillable`
+- Support the following restriction tokens :
+  - `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`.
+- Supports nullability in two different ways:
+  - Directly maps `nullable` property to the `nillable` XSD attribute (for frameworks that directly support this construct).
+  - Replace non-nullable atomic types with special `simpleType` defined as a union between the atomic type and the empty string.
+- Consolidates recurring string length restrictions into reusable `simpleType`'s named and ordered according to length range (e.g. `string64Type`, `string32TypeNillable`) to improve readability and simplify detection of inappropriate or incomplete type definitions.
 - Improve human readability:
   - Custom pretty print.
-  - Aligns and indents `type` attributes for readability (padding applied)
-  - Organizes schema in three separated block `SimpleTypes`, `ComplexTypes`, `Elements`
- 
+  - Aligns and indents `type` attributes for readability (padding applied).
+  - Organizes schema in separated block `Special Types`, `Simple Types`, `Complex Types`, `Elements`.
+
+## Supported Types & Formats
+The following Open API Types & Format modifiers are currently supported:
+
+Type          | Format         | Mapped XSD Type | Notes
+------------- | -------------- | --------------- | ---------------------------- 
+integer       | - | xs:integer | Generic integer number
+integer       | int32 | xs:int | 32 bit (-2³¹ to 2³¹-1)
+integer       | int64 | xs:long | 64 bit (-2⁶³ to 2⁶³-1)
+number        | - | xs:decimal | Arbitrary precision decimal
+number        | float | xs:float | 32 bit floating point
+number        | double | xs:double | 64 bit floating point
+string        | - | xs:string | Generic text
+string        | byte | xs:base64Binary | Binary encoded string
+string        | date | xs:date | Short date (YYYY-MM-DD)
+string        | date-time | xs:dateTime | Date & Time format ISO 8601
+date          | - | xs:date | Short date (YYYY-MM-DD)
+date-time     | - | xs:dateTime | Date & Time format ISO 8601
+boolean       | - | xs:boolean | true / false
+
 ---
 
 ## 🚫 Limitations
