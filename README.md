@@ -17,8 +17,8 @@
 
 ### ✅ XSD Schema Generation
 - Generates a comprehensive XML Schema (XSD).
+- Nested arrays and objects are fully managed.
 - Nested `$ref` schema chains are fully resolved.
-- Nested arrays and/or objects chains are fully managed.
 - Directly maps `required` property to `minOccurs="0"` XSD attribute when necessary.
 - Support the following restriction tokens :
   - `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`.
