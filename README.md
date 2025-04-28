@@ -24,8 +24,8 @@
   - `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`.
 - Supports nullability in two different ways:
   - Directly maps `nullable` property to the `nillable` XSD attribute.
-  - Replace not-nullable atomic types with reusable union `simpleType` that allow empty string validation.
-- Consolidates recurring string length restrictions into reusable `simpleType`'s named and ordered according to length range (e.g. `string64Type`, `string32TypeNillable`) to improve readability and simplify detection of inappropriate or incomplete type definitions.
+  - Replace not-nullable atomic types with reusable union `simpleType` that allow empty string as a surrogate for the null value (for those frameworks that do not support the `nillable` attribute).
+- Consolidates recurring string length restrictions into reusable `simpleType`'s named and ordered according to length range (e.g. `string64`, `string10to20`, `string32Nillable`) to improve readability and simplify detection of inappropriate or incomplete type definitions.
 - Improve human readability:
   - Custom pretty print.
   - Only types referenced in WADL are declared as global elements.
@@ -37,6 +37,7 @@ The following Open API Types & Format modifiers are currently supported:
 
 Type          | Format         | Mapped XSD Type | Notes
 ------------- | -------------- | --------------- | ---------------------------- 
+boolean       | - | xs:boolean | true / false
 integer       | - | xs:integer | Generic integer number
 integer       | int32 | xs:int | 32 bit (-2³¹ to 2³¹-1)
 integer       | int64 | xs:long | 64 bit (-2⁶³ to 2⁶³-1)
@@ -47,9 +48,6 @@ string        | - | xs:string | Generic text
 string        | byte | xs:base64Binary | Binary encoded string
 string        | date | xs:date | Short date (YYYY-MM-DD)
 string        | date-time | xs:dateTime | Date & Time format ISO 8601
-date          | - | xs:date | Short date (YYYY-MM-DD)
-date-time     | - | xs:dateTime | Date & Time format ISO 8601
-boolean       | - | xs:boolean | true / false
 
 ---
 
