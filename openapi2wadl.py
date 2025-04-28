@@ -209,21 +209,21 @@ def map_restrictions(element, schema):
 # ####################################################################################################
 # Gestisce mapping della nullability dei tipi atomici
 # ####################################################################################################
-def map_xsd_nullability(schema, type_name, nullability_registry, restriction_registry):
-
-    type_nullable = schema.get("nullable",False)
+def map_nullability(schema, type_prefix, type_name, nullability_registry, restriction_registry):
    
-    if not type_nullable:
-        return f"{XSD_PREFIX}:{type_name}"    
-    else:
+    if not schema.get("nullable",False):
+        return f"{type_prefix}:{type_name}"
+    else:        
+        nillable_type = f"{type_name}Nillable"
+    
+        if not nillable_type in nullability_registry:
+           simple_type = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name=nillable_type)
+           union = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}union", memberTypes=f"{type_prefix}:{type_name} {TARGET_PREFIX}:emptyString")
+           nullability_registry[nillable_type] = simple_type
+
         schema.pop("nullable")
         
-        if not type_name in nullability_registry:
-           simple_type = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name=f"{type_name}Nillable")
-           union = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}union", memberTypes=f"{XSD_PREFIX}:{type_name} {TARGET_PREFIX}:emptyString")
-           nullability_registry[type_name] = simple_type
-        
-        return f"{TARGET_PREFIX}:{type_name}Nillable"
+        return f"{TARGET_PREFIX}:{nillable_type}"
 
 # ####################################################################################################
 # Esegue mapping dei tipi swagger/openapi a XSD
@@ -231,6 +231,7 @@ def map_xsd_nullability(schema, type_name, nullability_registry, restriction_reg
 def map_xsd_types(schema, nullability_registry, restriction_registry):
         
     # acquisisce gli attributi del tipo
+    type_prefix = XSD_PREFIX
     type_name = schema.get("type","")
     type_format = schema.get("format","")
     type_nullable = schema.get("nullable",False)
@@ -238,54 +239,114 @@ def map_xsd_types(schema, nullability_registry, restriction_registry):
         
     # gestisce tipi boolean
     if type_name == "boolean":
-       return map_xsd_nullability(schema,type_name,nullability_registry,restriction_registry)
-        
-    # gestisce tipi data nativi
-    if type_name in ["date", "date-time"] and type_format == "":    
-        return map_xsd_nullability(schema,"dateTime" if type_name == "date-time" else "date",nullability_registry,restriction_registry)
+        return map_nullability(schema,type_prefix,type_name,nullability_registry,restriction_registry)
+                                    
+    # gestisce tipi byte
+    if type_name == "string" and type_format == "byte":
+        return map_nullability(schema,type_prefix,"base64Binary",nullability_registry,restriction_registry)
 
     # gestisce fomati data stringa
     if type_name == "string" and type_format in ["date", "date-time"]:
-        return map_xsd_nullability(schema,"dateTime" if type_format == "date-time" else "date",nullability_registry,restriction_registry)
-        
-    # gestisce tipi number
-    if type_name == "number" and type_format in ["","float","double"]:
-        return map_xsd_nullability(schema,"decimal" if type_format == "" else type_format,nullability_registry,restriction_registry)
-        
-    # gestisce tipi integer
-    if type_name == "integer" and type_format in ["","int32","int64"]:          
-        return map_xsd_nullability(schema,"integer" if type_format == "" else "int" if type_format == "int32" else "long",nullability_registry,restriction_registry)
+        return map_nullability(schema,type_prefix,"dateTime" if type_format == "date-time" else "date",nullability_registry,restriction_registry)
 
-    # gestisce tipi byte
-    if type_name == "string" and type_format == "byte":
-       return map_xsd_nullability(schema,"base64Binary",nullability_registry,restriction_registry)
-            
     # gestisce tipi stringa
     if type_name == "string":
     
+        # acquisisce eventuali restrizioni sui limiti
         min_len = type_restrictions.get("minLength", 0)
         max_len = type_restrictions.get("maxLength", "")
 
-        type_pre_part = "emptySting"  if max_len==0 else "openString" if not isinstance(max_len, int) else "string"       
-        type_end_part = "TypeNillable" if min_len==0 else "Type"
-        type_min_part = f"{min_len}" if isinstance(min_len, int) and min_len>1 else ""
-        type_max_part = f"{max_len}" if isinstance(max_len, int) and max_len>0 else ""
-        type_sep_part = "to" if type_min_part!="" and type_min_part!="" else ""  
-        
-        type_name = type_pre_part+type_min_part+type_sep_part+type_max_part+type_end_part
-            
+        # costruisce nome tipo riusabile
+        pre_part = "emptyString" if max_len==0 else "openString" if not isinstance(max_len, int) else "string"       
+        min_part = f"{min_len}" if isinstance(min_len, int) and min_len>1 else ""
+        max_part = f"{max_len}" if isinstance(max_len, int) and max_len>0 else ""
+        sep_part = "to" if min_part!="" and max_part!="" else ""  
+        end_part = "Nillable" if min_len==0 else ""        
+        type_name = pre_part+min_part+sep_part+max_part+end_part
+                        
+        # se non è già definito predispone simple type XML del tipo riusabile
         if not type_name in restriction_registry:
-            restriction_registry[type_name] = dict(filter(lambda item: item[0] in {"minLength","maxLength"}, type_restrictions.items()))
+            simple_type = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name=type_name)
+            restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:string")
+            map_restrictions(restriction, dict(filter(lambda item: item[0] in {"minLength","maxLength"}, type_restrictions.items())))        
+            restriction_registry[type_name] = simple_type        
 
+        # rimuove dallo schema le restrizioni mappate sul tipo riusabile (che non è necessario rigestire nel rendering dell'elemento)
         schema.pop("minLength",None)
         schema.pop("maxLength",None)
 
         return f"{TARGET_PREFIX}:{type_name}"
 
+    # gestisce tipi numerici
+    if (((type_name == "number") and (type_format in ["","float","double"])) or
+        ((type_name == "integer") and (type_format in ["","int32","int64"]))):  
+    
+        # corregge tipo in base all'eventuale specificatore di formato
+        if (type_name=="number"):
+            type_name = "decimal" if type_format == "" else type_format
+        else:        
+            type_name = "integer" if type_format == "" else "int" if type_format == "int32" else "long"  
+        
+        # acquisisce eventuali restrizioni sui limiti
+        min_val = type_restrictions.get("minimum","")
+        max_val = type_restrictions.get("maximum","")
+        min_excl = type_restrictions.get("exclusiveMinimum",False)
+        max_excl = type_restrictions.get("exclusiveMaximum",False)
+                   
+        # se ci sono restrizioni ridondanti sui limiti superiori le rimuove per semplificare la eventuale definizione dei tipi riusabili
+        if (((type_name=="int") and 
+             (((max_val == 2147483648) and (max_excl==True)) or
+              ((max_val == 2147483647) and (max_excl==False)))) or
+            ((type_name=="long") and 
+             (((max_val == 9223372036854775808) and (max_excl==True)) or
+              ((max_val == 9223372036854775807) and (max_excl==False))))):
+             
+            max_val = ""
+            type_restrictions.pop("maximum",None)
+            type_restrictions.pop("exclusiveMaximum",None)
+                                          
+        # se ci sono restrizioni sui limiti introduce tipo riusabile
+        if (min_val!="") or (max_val!=""):
+
+            # imposta il prefix dei tipi riusabili e salva il nome del tipo atomico
+            type_prefix = TARGET_PREFIX            
+            atomic_name = type_name
+        
+            # costruisce nome tipo riusabile
+            min_part = ("Gt"+("" if min_excl else "e")+f"{min_val}") if isinstance(min_val, int) else ""
+            max_part = ("Lt"+("" if max_excl else "e")+f"{max_val}") if isinstance(max_val, int) else ""          
+            end_part = min_part+max_part          
+            
+            # ridenomina alcuni tipi
+            if end_part == "Gt0":
+                type_name = "positive"+type_name.capitalize()
+            elif end_part == "Gte0":
+                type_name = "nonNegative"+type_name.capitalize()
+            elif end_part == "Lt0":
+                type_name = "negative"+type_name.capitalize()
+            elif end_part == "Lte0":
+                type_name = "nonPositive"+type_name.capitalize()
+            else:
+                type_name = type_name+end_part
+                
+            # se non è già definito predispone simple type XML del tipo riusabile
+            if not type_name in restriction_registry:            
+                simple_type = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name=type_name)
+                restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:{atomic_name}")
+                map_restrictions(restriction, dict(filter(lambda item: item[0] in {"minimum","maximum","exclusiveMinimum","exclusiveMaximum"}, type_restrictions.items())))            
+                restriction_registry[type_name] = simple_type
+                       
+            # rimuove dallo schema le restrizioni mappate sul tipo riusabile (che non è necessario rigestire nel rendering dell'elemento)
+            schema.pop("minimum",None)
+            schema.pop("maximum",None)
+            schema.pop("exclusiveMinimum",None)
+            schema.pop("exclusiveMaximum",None)
+
+        return map_nullability(schema,type_prefix,type_name,nullability_registry,restriction_registry)
+            
     # genera eccezione    
     print("Unsupported type: ",schema)
     sys.exit()
-
     
 # ####################################################################################################
 # Genera Element/SimpleType
@@ -420,6 +481,23 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
 # ####################################################################################################
 def generate_xsd(root_definitions,used_definitions,wadl_definitions,nullability_registry,restriction_registry):
 
+    # funzione di supporto per ordinamento dei simple type
+    def sorting_criteria(restriction_element):
+    
+        min_len = None
+        max_len = None
+        type_order = None
+        
+        for child in restriction_element.iter():
+            if child.tag.endswith("restriction"):
+                type_order = child.attrib.get("base")
+            if child.tag.endswith("minLength"):
+                min_len = int(child.attrib.get("value", "0"))
+            if child.tag.endswith("maxLength"):
+                max_len = int(child.attrib.get("value", str(float('inf'))))
+                
+        return (type_order, max_len or float('inf'), min_len or 0)
+
     # prepara variabili di lavoro
     complex_types = ET.Element("root")
     element_declarations = []
@@ -455,7 +533,7 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions,nullability_
     # Genera Special Type 
     # ================================================================================================
     schema.append(ET.Comment("#" * 100))
-    schema.append(ET.Comment(" Special Types for Nullability "))
+    schema.append(ET.Comment(" Special types for nullability of atomic types"))
     schema.append(ET.Comment("#" * 100))
 
     empty_string = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name="emptyString")
@@ -468,32 +546,34 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions,nullability_
         schema.append(element)
 
     # ================================================================================================
-    # Genera Simple Types
+    # Genera Reusable Types
     # ================================================================================================
     schema.append(ET.Comment("#" * 100))
-    schema.append(ET.Comment(" SimpleTypes "))
+    schema.append(ET.Comment(" Reusable types "))
     schema.append(ET.Comment("#" * 100))
 
     sorted_simpletypes = sorted(
         restriction_registry.items(),
-        key=lambda item: item[1].get("maxLength", float('inf'))
+        key=lambda item: (
+            sorting_criteria(item[1])[0], 
+            sorting_criteria(item[1])[1],
+            sorting_criteria(item[1])[2]
+            #item[0].lower()[0]
+        )
     )
-
-    for idx, (type_name, restrictions) in enumerate(sorted_simpletypes):
+    
+    for idx, (type_name, restriction) in enumerate(sorted_simpletypes):
     
         if idx > 0:
             schema.append(ET.Comment(" ~~~~~~~~ "))
             
-        simple_type = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name=type_name)
-        restriction = ET.SubElement(simple_type, f"{{{XSD_NAMESPACE}}}restriction", base=f"{XSD_PREFIX}:string")
-        map_restrictions(restriction, restrictions)
-        schema.append(simple_type)
+        schema.append(restriction)
 
     # ================================================================================================
     # Genera Complex Types
     # ================================================================================================
     schema.append(ET.Comment("#" * 100))
-    schema.append(ET.Comment(" ComplexTypes "))
+    schema.append(ET.Comment(" Complex types "))
     schema.append(ET.Comment("#" * 100))
 
     for child in complex_types:
