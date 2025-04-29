@@ -207,7 +207,6 @@ def map_restrictions(element, schema):
             ET.SubElement(element, f"{{{XSD_NAMESPACE}}}maxInclusive", value=str(schema["maximum"]))
             
     if "enum" in schema:
-        # esegue un ciclo su tutte le proprietà del complex type
         for value in schema.get("enum"):
            ET.SubElement(element, f"{{{XSD_NAMESPACE}}}enumeration", value=str(value if value!=None else ""))            
 
