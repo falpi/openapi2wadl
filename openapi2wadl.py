@@ -208,8 +208,8 @@ def map_restrictions(element, schema):
             
     if "enum" in schema:
         # esegue un ciclo su tutte le proprietà del complex type
-        for value in schema.get("enum"):           
-           ET.SubElement(element, f"{{{XSD_NAMESPACE}}}enumeration", value=str(value))            
+        for value in schema.get("enum"):
+           ET.SubElement(element, f"{{{XSD_NAMESPACE}}}enumeration", value=str(value if value!=None else ""))            
 
 # ####################################################################################################
 # Gestisce mapping della nullability dei tipi atomici
