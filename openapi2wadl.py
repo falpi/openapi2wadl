@@ -411,11 +411,15 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
     # se si tratta di un array esegue
     if def_ref=="" and def_type == "array":
                 
+        # acquisisce eventuali limiti dell'array
+        min_len = def_body.get("minItems","0")
+        max_len = def_body.get("maxItems","unbounded")
+        
         # crea nodi per array
         array_type = ET.SubElement(parent_element,f"{{{XSD_NAMESPACE}}}complexType")             
         array_sequence = ET.SubElement(array_type, f"{{{XSD_NAMESPACE}}}sequence")
         array_element = ET.SubElement(array_sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
-            "name": "item", "minOccurs": "0", "maxOccurs": "unbounded"
+            "name": "item", "minOccurs": f"{min_len}", "maxOccurs": f"{max_len}"
         })
         
         # se è un nodo radice aggiunge l'attributo del nome
