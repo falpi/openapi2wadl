@@ -648,11 +648,15 @@ def generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename,nu
         
         for method_name, method_def in methods.items():
         
-            operationId = method_def.get("operationId","")
-            if operationId=="":
-                method = ET.SubElement(resource,f"{{{WADL_NAMESPACE}}}method", name=method_name.upper())
-            else:
-                method = ET.SubElement(resource,f"{{{WADL_NAMESPACE}}}method", name=method_name.upper(),id=operationId)            
+            operationId = method_def.get("operationId", "").strip()
+
+            # Se manca l'operationId, prova a ricavarlo dal path estraendone la parte finale ma ignorando l'eventuale parametro
+            if not operationId:
+                # estrae le parti del path ignorando quelle parametriche
+                parts = [p for p in path.strip("/").split("/") if not (p.startswith("{") and p.endswith("}"))]
+                operationId = parts[-1] if parts else method_name.lower()
+
+            method = ET.SubElement(resource, f"{{{WADL_NAMESPACE}}}method", name=method_name.upper(), id=operationId)
                         
             # ------------------------------------------------------------------------------------------------
             # Genera Request
