@@ -24,11 +24,19 @@ XSD_NAMESPACE = "http://www.w3.org/2001/XMLSchema"
 WADL_PREFIX = ""
 WADL_NAMESPACE = "http://wadl.dev.java.net/2009/02"
 
+WSDL_PREFIX = "wsdl"
+WSDL_NAMESPACE = "http://schemas.xmlsoap.org/wsdl/"
+
+SOAP_PREFIX = "soap"
+SOAP_NAMESPACE = "http://schemas.xmlsoap.org/wsdl/soap/"
+
 TARGET_PREFIX = "tns"
 TARGET_NAMESPACE = "http://example.com/schema"
 
 ET.register_namespace(XSD_PREFIX, XSD_NAMESPACE)
 ET.register_namespace(WADL_PREFIX, WADL_NAMESPACE)
+ET.register_namespace(WSDL_PREFIX, WSDL_NAMESPACE)
+ET.register_namespace(SOAP_PREFIX, SOAP_NAMESPACE)
 ET.register_namespace(TARGET_PREFIX, TARGET_NAMESPACE)
 
 # ####################################################################################################
@@ -39,7 +47,7 @@ def prettify_xml(elem):
     rough_string = ET.tostring(elem, 'utf-8')
     reparsed = minidom.parseString(rough_string)
 
-    pretty = reparsed.toprettyxml(indent="  ")
+    pretty = reparsed.toprettyxml(indent="   ")
 
     # Correggi solo gli attributi name con spazi interni
     fixed = re.sub(r'name="([A-Za-z0-9_]+)(\s+)"', r'name="\1"\2', pretty)
@@ -232,7 +240,7 @@ def map_nullability(schema, type_prefix, type_name, nullability_registry, restri
 # ####################################################################################################
 # Esegue mapping dei tipi swagger/openapi a XSD
 # ####################################################################################################
-def map_xsd_types(schema, nullability_registry, restriction_registry):
+def map_type(schema, nullability_registry, restriction_registry):
         
     # acquisisce gli attributi del tipo
     type_prefix = XSD_PREFIX
@@ -368,7 +376,7 @@ def generate_xsd_simple_type(level, parent_element, schema, nullability_registry
        parent_element.set('nillable',"true")    
             
     # determina il tipo xsd più appropriato 
-    mapped_type = map_xsd_types(schema,nullability_registry,restriction_registry)
+    mapped_type = map_type(schema,nullability_registry,restriction_registry)
 
     # riacquisisce parametri tipo 
     type_nullable = schema.get("nullable", False)    
@@ -487,7 +495,7 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
 # ####################################################################################################
 # Genera il file XSD
 # ####################################################################################################
-def generate_xsd(root_definitions,used_definitions,wadl_definitions,nullability_registry,restriction_registry):
+def generate_xsd(root_definitions,used_definitions,main_definitions,nullability_registry,restriction_registry):
 
     # funzione di supporto per ordinamento dei simple type
     def sorting_criteria(restriction_element):
@@ -518,7 +526,7 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions,nullability_
     })
 
     # ================================================================================================
-    # Prepara tipi
+    # Prepara Complex Types
     # ================================================================================================
 
     # Esegue un ciclo su tutti i tipi definiti al primo livello del contract
@@ -534,7 +542,7 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions,nullability_
         generate_xsd_type(0,complex_types, def_name, def_body, root_definitions, nullability_registry, restriction_registry)
                             
         # se il complex type è referenziato dal wadl 
-        if def_name in wadl_definitions:
+        if def_name in main_definitions:
             element_declarations.append(def_name)
 
     # ================================================================================================
@@ -576,7 +584,7 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions,nullability_
             schema.append(ET.Comment(" ~~~~~~~~ "))
             
         schema.append(restriction)
-
+        
     # ================================================================================================
     # Genera Complex Types
     # ================================================================================================
@@ -607,7 +615,7 @@ def generate_xsd(root_definitions,used_definitions,wadl_definitions,nullability_
 # ####################################################################################################
 # Genera il file WADL
 # ####################################################################################################
-def generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename,nullability_registry,restriction_registry):
+def generate_wadl(spec,version,root_definitions,main_definitions,xsd_filename,nullability_registry,restriction_registry):
     
     application = ET.Element(f"{{{WADL_NAMESPACE}}}application", attrib={
         f"xmlns:{XSD_PREFIX}": XSD_NAMESPACE,
@@ -670,7 +678,7 @@ def generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename,nu
                     schema_ref = body_def.get("schema", {}).get("$ref")
                     if schema_ref:
                         type_name = schema_ref.split("/")[-1]
-                        wadl_definitions.add(type_name)
+                        main_definitions.add(type_name)
                         ET.SubElement(request,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt, element=f"{TARGET_PREFIX}:{type_name}")                        
 
             # Genera parameters ed eventuali representation per i request body del swagger2, mappando i style da swagger/openapi3 a WADL
@@ -689,15 +697,15 @@ def generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename,nu
                 elif version == "swagger2" and param_in=="body" and "$ref" in param_schema:
                     type_name = param_schema["$ref"].split("/")[-1]
                     for mt in consumes:
-                        wadl_definitions.add(type_name)
+                        main_definitions.add(type_name)
                         ET.SubElement(request,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt, element=f"{TARGET_PREFIX}:{type_name}")
                     continue
                 else:
                     continue  # Unsupported param location
 
-                param_type = map_xsd_types(param_schema,nullability_registry,restriction_registry)
+                param_type = map_type(param_schema,nullability_registry,restriction_registry)
                 ET.SubElement(request,f"{{{WADL_NAMESPACE}}}param", name=param_name, style=param_style, type=param_type, required=str(param.get("required", False)).lower())
-
+                    
             # ------------------------------------------------------------------------------------------------
             # Gestisce Responses
             # ------------------------------------------------------------------------------------------------
@@ -711,7 +719,7 @@ def generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename,nu
                     schema = content_def.get("schema", {})
                     if "$ref" in schema:
                         type_name = schema["$ref"].split("/")[-1]
-                        wadl_definitions.add(type_name)
+                        main_definitions.add(type_name)
                         ET.SubElement(response_el,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt, element=f"{TARGET_PREFIX}:{type_name}")
                     else:
                         ET.SubElement(response_el,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt)
@@ -746,15 +754,15 @@ def main():
     nullability_registry = {}
     restriction_registry = {}
 
-    wadl_definitions = set()
+    main_definitions = set()
     root_definitions = extract_root_definitions(spec, version)
     used_definitions = extract_used_definitions(spec, version, root_definitions)
     
     # Generazione del WADL
-    wadl_tree = generate_wadl(spec,version,root_definitions,wadl_definitions,xsd_filename,nullability_registry,restriction_registry)
-
+    wadl_tree = generate_wadl(spec,version,root_definitions,main_definitions,xsd_filename,nullability_registry,restriction_registry)
+    
     # Generazione XSD 
-    xsd_tree = generate_xsd(root_definitions,used_definitions,wadl_definitions,nullability_registry,restriction_registry)
+    xsd_tree = generate_xsd(root_definitions,used_definitions,main_definitions,nullability_registry,restriction_registry)
 
     # Scrittura file XSD
     with open(os.path.join(args.output_dir, xsd_filename), "w", encoding="utf-8") as f:
@@ -764,8 +772,8 @@ def main():
     with open(os.path.join(args.output_dir, wadl_filename), "w", encoding="utf-8") as f:
         f.write(prettify_xml(wadl_tree))
 
-    print(f"Generated WADL: {wadl_filename}")
     print(f"Generated XSD: {xsd_filename}")
+    print(f"Generated WADL: {wadl_filename}")
 
 # ####################################################################################################
 # Entry point
