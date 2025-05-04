@@ -15,8 +15,15 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
 # ####################################################################################################
-# Definizione dei namespace
+# Definizione costanti e namespace
 # ####################################################################################################
+
+OSB_PATH = ""
+SERVICE_NAME = "MyServiceName"
+SERVICE_VERSION = "1.0"
+
+SOA_PREFIX = "soa"
+SOA_NAMESPACE = "http://www.oracle.com/soa/rest"
 
 XSD_PREFIX = "xsd"
 XSD_NAMESPACE = "http://www.w3.org/2001/XMLSchema"
@@ -33,6 +40,7 @@ SOAP_NAMESPACE = "http://schemas.xmlsoap.org/wsdl/soap/"
 TARGET_PREFIX = "tns"
 TARGET_NAMESPACE = "http://example.com/schema"
 
+ET.register_namespace(SOA_PREFIX, SOA_NAMESPACE)
 ET.register_namespace(XSD_PREFIX, XSD_NAMESPACE)
 ET.register_namespace(WADL_PREFIX, WADL_NAMESPACE)
 ET.register_namespace(WSDL_PREFIX, WSDL_NAMESPACE)
@@ -46,7 +54,6 @@ def prettify_xml(elem):
 
     rough_string = ET.tostring(elem, 'utf-8')
     reparsed = minidom.parseString(rough_string)
-
     pretty = reparsed.toprettyxml(indent="   ")
 
     # Correggi solo gli attributi name con spazi interni
@@ -57,6 +64,10 @@ def prettify_xml(elem):
     fixed = re.sub(r'<(.+?)(?=\sminOccurs)(\sminOccurs="[^"]*")([^\/|>]*)(\/)?>', r'<\1\3\2\4>', fixed)
     fixed = re.sub(r'<(.+?)(?=\smaxOccurs)(\smaxOccurs="[^"]*")([^\/|>]*)(\/)?>', r'<\1\3\2\4>', fixed)
 
+    # compatta operations wsdl
+    fixed = re.sub(r'<wsdl:input>[^<>]*<soap:body use="literal"/>[^<>]*</wsdl:input>', r'<wsdl:input><soap:body use="literal"/></wsdl:input>',fixed,flags=re.DOTALL)
+    fixed = re.sub(r'<wsdl:output>[^<>]*<soap:body use="literal"/>[^<>]*</wsdl:output>', r'<wsdl:output><soap:body use="literal"/></wsdl:output>',fixed,flags=re.DOTALL)
+    
     # Sposta in fondo id su "method"
     fixed = re.sub(r'<(method)(\sid="[^"]*")([^\/|>]*)(\/)?>', r'<\1\3\2\4>', fixed)
 
@@ -238,7 +249,49 @@ def map_nullability(schema, type_prefix, type_name, nullability_registry, restri
         return f"{TARGET_PREFIX}:{nillable_type}"
 
 # ####################################################################################################
-# Esegue mapping dei tipi swagger/openapi a XSD
+# Esegue mapping dei tipi atomici swagger/openapi a XSD
+# ####################################################################################################
+def map_type_atomic(schema):
+        
+    # acquisisce gli attributi del tipo
+    type_prefix = XSD_PREFIX
+    type_name = schema.get("type","")
+    type_format = schema.get("format","")
+        
+    # gestisce tipi boolean
+    if type_name == "boolean":
+        return f"{type_prefix}:{type_name}"
+                                    
+    # gestisce tipi byte
+    if type_name == "string" and type_format == "byte":
+        return type_prefix+":base64Binary"
+
+    # gestisce fomati data stringa
+    if type_name == "string" and type_format in ["date", "date-time"]:
+        return type_prefix+":"+("dateTime" if type_format == "date-time" else "date")
+
+    # gestisce tipi stringa
+    if type_name == "string":
+        return f"{type_prefix}:{type_name}"
+
+    # gestisce tipi numerici
+    if (((type_name == "number") and (type_format in ["","float","double"])) or
+        ((type_name == "integer") and (type_format in ["","int32","int64"]))):  
+    
+        # corregge tipo in base all'eventuale specificatore di formato
+        if (type_name=="number"):
+            type_name = "decimal" if type_format == "" else type_format
+        else:        
+            type_name = "integer" if type_format == "" else "int" if type_format == "int32" else "long"  
+        
+        return f"{type_prefix}:{type_name}"
+            
+    # genera eccezione    
+    print("Unsupported type: ",schema)
+    sys.exit()
+
+# ####################################################################################################
+# Esegue mapping dei tipi swagger/openapi a XSD (crea tipi riusabili in presenza di retrizioni)
 # ####################################################################################################
 def map_type(schema, nullability_registry, restriction_registry):
         
@@ -456,12 +509,12 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
            complex_type.set("name",root_name)
 
         # esegue un ciclo su tutte le proprietà del complex type
-        for prop_name, prop_attrs in def_properties.items():
+        for properation_name, prop_attrs in def_properties.items():
                         
             # crea attributi per nodo 
-            element_attrib = {"name": prop_name}
+            element_attrib = {"name": properation_name}
             
-            if prop_name not in def_required:
+            if properation_name not in def_required:
                 element_attrib["minOccurs"] = "0"
 
             # verifica se si tratta di un $ref
@@ -479,7 +532,7 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
             else:
             
                 # corregge nome elemento per introdurre padding
-                element_attrib["name"] = element_attrib["name"] + (" " * (name_padding-len(prop_name)))
+                element_attrib["name"] = element_attrib["name"] + (" " * (name_padding-len(properation_name)))
                     
                 # crea nodo per elemento semplice
                 simple_element = ET.SubElement(sequence,f"{{{XSD_NAMESPACE}}}element", attrib=element_attrib)
@@ -495,7 +548,7 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
 # ####################################################################################################
 # Genera il file XSD
 # ####################################################################################################
-def generate_xsd(root_definitions,used_definitions,main_definitions,nullability_registry,restriction_registry):
+def generate_xsd(root_definitions,used_definitions,element_registry,nullability_registry,restriction_registry):
 
     # funzione di supporto per ordinamento dei simple type
     def sorting_criteria(restriction_element):
@@ -541,15 +594,11 @@ def generate_xsd(root_definitions,used_definitions,main_definitions,nullability_
         # genera il prossimo complex type
         generate_xsd_type(0,complex_types, def_name, def_body, root_definitions, nullability_registry, restriction_registry)
                             
-        # se il complex type è referenziato dal wadl 
-        if def_name in main_definitions:
-            element_declarations.append(def_name)
-
     # ================================================================================================
-    # Genera Special Type 
+    # Genera Special Types
     # ================================================================================================
     schema.append(ET.Comment("#" * 100))
-    schema.append(ET.Comment(" Special types for nullability of atomic types"))
+    schema.append(ET.Comment(" SimpleTypes for nullability of atomic types"))
     schema.append(ET.Comment("#" * 100))
 
     empty_string = ET.Element(f"{{{XSD_NAMESPACE}}}simpleType", name="emptyString")
@@ -565,7 +614,7 @@ def generate_xsd(root_definitions,used_definitions,main_definitions,nullability_
     # Genera Reusable Types
     # ================================================================================================
     schema.append(ET.Comment("#" * 100))
-    schema.append(ET.Comment(" Reusable types "))
+    schema.append(ET.Comment(" SimpleTypes for reusable restrictions"))
     schema.append(ET.Comment("#" * 100))
 
     sorted_simpletypes = sorted(
@@ -589,24 +638,26 @@ def generate_xsd(root_definitions,used_definitions,main_definitions,nullability_
     # Genera Complex Types
     # ================================================================================================
     schema.append(ET.Comment("#" * 100))
-    schema.append(ET.Comment(" Complex types "))
+    schema.append(ET.Comment(" ComplexTypes for schema definitions"))
     schema.append(ET.Comment("#" * 100))
 
     for child in complex_types:
        schema.append(child);
 
     # ================================================================================================
-    # Genera Element
+    # Genera Element di interfaccia
     # ================================================================================================
     schema.append(ET.Comment("#" * 100))
-    schema.append(ET.Comment(" Elements "))
+    schema.append(ET.Comment(" Elements for interface definitions "))
     schema.append(ET.Comment("#" * 100))
 
-    for def_name in element_declarations:
-        ET.SubElement(schema, f"{{{XSD_NAMESPACE}}}element", attrib={
-            "name": def_name,
-            "type": f"{TARGET_PREFIX}:{def_name}"
-        })
+    for idx, (element_name, element_node) in enumerate(element_registry.items()):
+    
+        # se necessario crea separatore tra gli element
+        if idx > 0 and element_name.endswith("Request"):
+            schema.append(ET.Comment(" ~~~~~~~~ "))
+    
+        schema.append(element_node)
 
     # ================================================================================================
 
@@ -615,7 +666,7 @@ def generate_xsd(root_definitions,used_definitions,main_definitions,nullability_
 # ####################################################################################################
 # Genera il file WADL
 # ####################################################################################################
-def generate_wadl(spec,version,root_definitions,main_definitions,xsd_filename,nullability_registry,restriction_registry):
+def generate_wadl(spec,version,root_definitions,xsd_filename,element_registry,nullability_registry,restriction_registry):
     
     application = ET.Element(f"{{{WADL_NAMESPACE}}}application", attrib={
         f"xmlns:{XSD_PREFIX}": XSD_NAMESPACE,
@@ -656,6 +707,10 @@ def generate_wadl(spec,version,root_definitions,main_definitions,xsd_filename,nu
         
         for method_name, method_def in methods.items():
         
+            # Acquisisce proprietà del metodo
+            produces = method_def.get("produces", []) 
+            responses = method_def.get("responses", {})
+            parameters = method_def.get("parameters", [])
             operationId = method_def.get("operationId", "").strip()
 
             # Se manca operationId lo ricava dal path estraendone l'ultimo token ignorando eventuali parametri
@@ -663,106 +718,407 @@ def generate_wadl(spec,version,root_definitions,main_definitions,xsd_filename,nu
                 parts = [p for p in path.strip("/").split("/") if not (p.startswith("{") and p.endswith("}"))]
                 operationId = parts[-1] if parts else method_name.lower()
 
-            method = ET.SubElement(resource, f"{{{WADL_NAMESPACE}}}method", name=method_name.upper(), id=operationId)
+            # Genera elemento XML del metodo
+            method = ET.SubElement(resource, f"{{{WADL_NAMESPACE}}}method", name=method_name.upper(), id=operationId, attrib={f"{{{SOA_NAMESPACE}}}wsdlOperation":operationId})
                         
+            # Prepara nomi per gli element di interfaccia
+            request_name = operationId[0].upper()+operationId[1:]+"Request"
+            response_name = operationId[0].upper()+operationId[1:]+"Response"
+                                                
             # ------------------------------------------------------------------------------------------------
             # Genera Request
-            # ------------------------------------------------------------------------------------------------
+            # ------------------------------------------------------------------------------------------------ 
 
-            request = ET.SubElement(method,f"{{{WADL_NAMESPACE}}}request")
+            # Genera elemento WADL della request del metodo
+            request_elem = ET.SubElement(method,f"{{{WADL_NAMESPACE}}}request")
 
-            # Genera representation per i request body dell'openapi3
-            if (version == "openapi3") and ("requestBody" in method_def):
-                content = method_def["requestBody"].get("content", {})
-                for mt, body_def in content.items():
-                    schema_ref = body_def.get("schema", {}).get("$ref")
-                    if schema_ref:
-                        type_name = schema_ref.split("/")[-1]
-                        main_definitions.add(type_name)
-                        ET.SubElement(request,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt, element=f"{TARGET_PREFIX}:{type_name}")                        
+            # Prepara elemento XSD di request dell'operation
+            request_node = ET.Element(f"{{{XSD_NAMESPACE}}}element", name=request_name)
+            element_registry[request_name] = request_node            
+            sequence = None
 
-            # Genera parameters ed eventuali representation per i request body del swagger2, mappando i style da swagger/openapi3 a WADL
-            consumes = method_def.get("consumes", [])
-            parameters = method_def.get("parameters", [])
-
+            # Gestione dei parameters diversi da body
             for param in parameters:
-                param_name = param["name"]
-                param_schema = param.get("schema",{})
-                param_in = param.get("in", "query")
+            
+                # Acquisisce attributi parametro
+                param_name = param.get("name")
+                param_style = param.get("in", "query")
+                param_required = param.get("required", False)
                 
-                if param_in == "path":
+                # Se necessario mappa style del parametro
+                if param_style == "path":
                     param_style = "template"
-                elif param_in in ["query", "header", "matrix"]:
-                    param_style = param_in
-                elif version == "swagger2" and param_in=="body" and "$ref" in param_schema:
-                    type_name = param_schema["$ref"].split("/")[-1]
-                    for mt in consumes:
-                        main_definitions.add(type_name)
-                        ET.SubElement(request,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt, element=f"{TARGET_PREFIX}:{type_name}")
+                elif not param_style in ["query", "header", "matrix"]:
                     continue
-                else:
-                    continue  # Unsupported param location
 
-                param_type = map_type(param_schema,nullability_registry,restriction_registry)
-                ET.SubElement(request,f"{{{WADL_NAMESPACE}}}param", name=param_name, style=param_style, type=param_type, required=str(param.get("required", False)).lower())
+                if not "schema" in param:
+                   schema = param
+                else:
+                   schema = param.get("schema")
+                   
+                # Se necessario mappa il tipo del parametro
+                param_type = map_type_atomic(schema)
+
+                # Aggiunge parametro all'elemento WADL                
+                ET.SubElement(request_elem,f"{{{WADL_NAMESPACE}}}param", name=param_name, style=param_style, type=param_type, required=str(param_required).lower(),attrib={
+                    f"{SOA_PREFIX}:expression": "$msg.parameters/"+param_name
+                })     
+                
+                # Aggiunge parametro all'elemento XSD
+                if not sequence:
+                    complex_type = ET.SubElement(request_node,f"{{{XSD_NAMESPACE}}}complexType")
+                    sequence = ET.SubElement(complex_type,f"{{{XSD_NAMESPACE}}}sequence")
+                
+                param_elem = ET.SubElement(sequence,f"{{{XSD_NAMESPACE}}}element", name=param_name, type=param_type) 
+                
+                if not param_required:
+                   param_elem.set("minOccurs","0");
                     
+            # Gestione dei representation di request body (swagger2)
+            if version == "swagger2":
+                        
+                consumes = method_def.get("consumes", []) 
+
+                for param in parameters:
+                    if param.get("in")=="body":
+                
+                        schema_ref = param.get("schema", {}).get("$ref")
+                    
+                        # Se non è uno schema $ref non lo gestisce e aggiunge solo elemento WADL, altrimenti procede
+                        if not schema_ref:
+                            ET.SubElement(request_elem,f"{{{WADL_NAMESPACE}}}representation", mediaType=media_type)  
+                        else:
+                            type_name = schema_ref.split("/")[-1]      
+                            
+                            for media_type in consumes:          
+
+                                # Aggiunge body all'elemento WADL                                            
+                                ET.SubElement(request_elem,f"{{{WADL_NAMESPACE}}}representation", mediaType=media_type, element=f"{TARGET_PREFIX}:{request_name}")
+                                
+                                # Aggiunge body all'elemento XSD
+                                if not sequence:
+                                   request_node.set("type",f"{TARGET_PREFIX}:{type_name}")
+                                else:
+                                   ET.SubElement(sequence,f"{{{XSD_NAMESPACE}}}element", name=request_name, type=f"{TARGET_PREFIX}:{type_name}")                    
+                
+            # Gestione dei representation per i request body (openapi3)
+            if version == "openapi3":
+            
+                # Prepara elenco delle request 
+                contents = method_def.get("requestBody",{}).get("content", {})
+                
+                # Scandisce le request previste
+                for media_type, body_def in contents.items():
+                                
+                    schema_ref = body_def.get("schema", {}).get("$ref")
+                    
+                    # Se non è uno schema $ref non lo gestisce e aggiunge solo elemento WADL, altrimenti procede
+                    if not schema_ref:
+                        ET.SubElement(request_elem,f"{{{WADL_NAMESPACE}}}representation", mediaType=media_type)  
+                    else:
+                        type_name = schema_ref.split("/")[-1]
+
+                        # Aggiunge body all'elemento WADL                                                               
+                        ET.SubElement(request_elem,f"{{{WADL_NAMESPACE}}}representation", mediaType=media_type, element=f"{TARGET_PREFIX}:{request_name}")
+                        
+                        # Aggiunge body all'elemento XSD
+                        if not sequence:
+                           request_node.set("type",f"{TARGET_PREFIX}:{type_name}")
+                        else:
+                           ET.SubElement(sequence,f"{{{XSD_NAMESPACE}}}element", name=request_name, type=f"{TARGET_PREFIX}:{type_name}")                    
+                                        
             # ------------------------------------------------------------------------------------------------
             # Gestisce Responses
             # ------------------------------------------------------------------------------------------------
-
-            responses = method_def.get("responses", {})
-            
+                       
+            # Gestione delle response
             for status, response in responses.items():
-                response_el = ET.SubElement(method,f"{{{WADL_NAMESPACE}}}response", status=status)
+                
+                # Genera elemento WADL della response
+                response_elem = ET.SubElement(method,f"{{{WADL_NAMESPACE}}}response", status=status)
+                
+                # Prepara elenco delle response in base alla specifica
                 contents = response.get("content", {}) if version == "openapi3" else {"application/json": response}
-                for mt, content_def in contents.items():
-                    schema = content_def.get("schema", {})
-                    if "$ref" in schema:
-                        type_name = schema["$ref"].split("/")[-1]
-                        main_definitions.add(type_name)
-                        ET.SubElement(response_el,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt, element=f"{TARGET_PREFIX}:{type_name}")
+                
+                # Scandisce le response previste
+                for media_type, content_def in contents.items():
+                
+                    schema_ref = content_def.get("schema", {}).get("$ref")
+                    
+                    # Se non è uno schema $ref non lo gestisce e aggiunge solo elemento WADL, altrimenti procede
+                    if not schema_ref:
+                        ET.SubElement(response_elem,f"{{{WADL_NAMESPACE}}}representation", mediaType=media_type)  
                     else:
-                        ET.SubElement(response_el,f"{{{WADL_NAMESPACE}}}representation", mediaType=mt)
+                        type_name = schema_ref.split("/")[-1]
+                        
+                        # Aggiunge body all'elemento WADL                                                               
+                        ET.SubElement(response_elem,f"{{{WADL_NAMESPACE}}}representation", mediaType=media_type, element=f"{TARGET_PREFIX}:{response_name}")
+                        
+                        # Se è già stato aggiunto un elemento all'XSD genera eccezione
+                        if response_name in element_registry:
+                            raise Error("Duplicated operation name ("+response_name+")")       
+                            
+                        # Aggiunge body all'elemento XSD
+                        element_registry[response_name] = ET.Element(f"{{{XSD_NAMESPACE}}}element", name=response_name, type=f"{TARGET_PREFIX}:{type_name}")                           
 
     # ================================================================================================
 
     return application
 
 # ####################################################################################################
+# Genera il file WSDL
+# ####################################################################################################
+def generate_wsdl(application, xsd_filename):
+
+    # ================================================================================================
+    # Variabili
+    # ================================================================================================
+    messages = []
+    operations = []
+
+    port_name = f"{SERVICE_NAME}_{SERVICE_VERSION}_Port"
+    service_name = f"{SERVICE_NAME}_{SERVICE_VERSION}_Service"
+    port_type_name = f"{SERVICE_NAME}_{SERVICE_VERSION}_PortType"
+    binding_name = f"{SERVICE_NAME}_{SERVICE_VERSION}_Binding"
+
+    # ================================================================================================
+    # Genera Wsdl 
+    # ================================================================================================
+    wsdl = ET.Element(f"{{{WSDL_NAMESPACE}}}definitions", attrib={
+        "name": f"{SERVICE_NAME}_{SERVICE_VERSION}",
+        "targetNamespace": TARGET_NAMESPACE,
+        f"xmlns:{TARGET_PREFIX}": TARGET_NAMESPACE
+    })
+
+    # ================================================================================================
+    # Genera Types
+    # ================================================================================================
+    wsdl.append(ET.Comment("#" * 100))
+    wsdl.append(ET.Comment(" TYPES "))
+    wsdl.append(ET.Comment("#" * 100))    
+    
+    types = ET.SubElement(wsdl, f"{{{WSDL_NAMESPACE}}}types")
+    schema = ET.SubElement(types, f"{{{XSD_NAMESPACE}}}schema", attrib={
+        "targetNamespace": TARGET_NAMESPACE
+    })
+    ET.SubElement(schema, f"{{{XSD_NAMESPACE}}}include", attrib={
+        "schemaLocation": os.path.basename(xsd_filename)
+    })
+
+    # ================================================================================================
+    # Genera Message
+    # ================================================================================================
+    wsdl.append(ET.Comment("#" * 100))
+    wsdl.append(ET.Comment(" MESSAGES "))
+    wsdl.append(ET.Comment("#" * 100))    
+
+    for idx, resource in enumerate(application.findall(f".//{{{WADL_NAMESPACE}}}resource")):
+    
+        if idx > 0:
+            wsdl.append(ET.Comment(" ~~~~~~~~ "))
+
+        path = resource.attrib.get("path", "")
+        for method in resource.findall(f"{{{WADL_NAMESPACE}}}method"):
+                
+            # Prepara operation
+            operation_name = method.attrib.get("id") 
+            operation_soa = method.attrib.get(f"{{{SOA_NAMESPACE}}}wsdlOperation") 
+            
+            # Se manca operationId lo ricava dal path estraendone l'ultimo token ignorando eventuali parametri
+            if not operation_name:
+                parts = [p for p in path.strip("/").split("/") if not (p.startswith("{") and p.endswith("}"))]
+                operation_name = parts[-1] if parts else method.attrib.get("name").lower()        
+
+            # Capitalizza operation
+            operation_name = operation_name[0].upper()+operation_name[1:]
+        
+            # Crea i message            
+            msg_in = ET.SubElement(wsdl, f"{{{WSDL_NAMESPACE}}}message", name=f"{operation_name}_InputMessage")
+            ET.SubElement(msg_in, f"{{{WSDL_NAMESPACE}}}part", name="parameters", element=f"{TARGET_PREFIX}:{operation_name}Request")                  
+
+            msg_out = ET.SubElement(wsdl, f"{{{WSDL_NAMESPACE}}}message", name=f"{operation_name}_OutputMessage")            
+            ET.SubElement(msg_out, f"{{{WSDL_NAMESPACE}}}part", name="parameters", element=f"{TARGET_PREFIX}:{operation_name}Response")
+
+            # Salva operation_name per portType/binding
+            operations.append([operation_name,operation_soa])
+
+    # ================================================================================================
+    # Genera PortType
+    # ================================================================================================
+    wsdl.append(ET.Comment("#" * 100))
+    wsdl.append(ET.Comment(" PORT TYPES "))
+    wsdl.append(ET.Comment("#" * 100))        
+    port_type = ET.SubElement(wsdl, f"{{{WSDL_NAMESPACE}}}portType", name=port_type_name)
+    
+    for idx, operation in enumerate(operations):
+    
+        if idx > 0:
+            port_type.append(ET.Comment(" ~~~~~~~~ "))
+
+        op = ET.SubElement(port_type, f"{{{WSDL_NAMESPACE}}}operation", name=operation[1])
+        ET.SubElement(op, f"{{{WSDL_NAMESPACE}}}input", message=f"{TARGET_PREFIX}:{operation[0]}_InputMessage")
+        ET.SubElement(op, f"{{{WSDL_NAMESPACE}}}output", message=f"{TARGET_PREFIX}:{operation[0]}_OutputMessage")
+
+    # =====================
+    # Genera Binding
+    # =====================
+    wsdl.append(ET.Comment("#" * 100))
+    wsdl.append(ET.Comment(" BINDINGS "))
+    wsdl.append(ET.Comment("#" * 100))    
+
+    binding = ET.SubElement(wsdl, f"{{{WSDL_NAMESPACE}}}binding", name=binding_name, type=f"{TARGET_PREFIX}:{port_type_name}")
+    ET.SubElement(binding, f"{{{SOAP_NAMESPACE}}}binding", style="document", transport="http://schemas.xmlsoap.org/soap/http")
+
+    for idx, operation in enumerate(operations):
+    
+        if idx > 0:
+            binding.append(ET.Comment(" ~~~~~~~~ "))
+
+        op = ET.SubElement(binding, f"{{{WSDL_NAMESPACE}}}operation", name=operation[1])
+        ET.SubElement(op, f"{{{SOAP_NAMESPACE}}}operation", soapAction=operation[1], style="document")
+        ET.SubElement(op, f"{{{WSDL_NAMESPACE}}}input").append(
+            ET.Element(f"{{{SOAP_NAMESPACE}}}body", use="literal")
+        )
+        ET.SubElement(op, f"{{{WSDL_NAMESPACE}}}output").append(
+            ET.Element(f"{{{SOAP_NAMESPACE}}}body", use="literal")
+        )
+
+    # =====================
+    # Genera Service
+    # =====================
+    wsdl.append(ET.Comment("#" * 100))
+    wsdl.append(ET.Comment(" SERVICES "))
+    wsdl.append(ET.Comment("#" * 100))    
+    
+    service = ET.SubElement(wsdl, f"{{{WSDL_NAMESPACE}}}service", name=service_name)
+    port = ET.SubElement(service, f"{{{WSDL_NAMESPACE}}}port", name=port_name, binding=f"{TARGET_PREFIX}:{binding_name}")
+    ET.SubElement(port, f"{{{SOAP_NAMESPACE}}}address", location="http://localhost/service")
+
+    return wsdl
+
+# ####################################################################################################
+# Search & replace regex patterns in multiple template files
+# ####################################################################################################
+def batch_search_and_replace_templates(source_directory, replacements, output_basename , overwrite=True):
+    """
+    Esegue sostituzioni multiple nei file di una directory e salva i file aggiornati nella directory corrente.
+    Il contatore numerico nel nome viene aggiunto solo se necessario per evitare conflitti.
+    :param source_directory: Path della directory sorgente contenente i file originali.
+    :param replacements: Lista di tuple (pattern, replacement).
+    :param output_basename: Prefisso base per i file aggiornati (senza estensione).
+    """
+    compiled_patterns = [(re.compile(pattern), replacement) for pattern, replacement in replacements]
+
+    for filename in os.listdir(source_directory):
+    
+        print("Parsing: ",filename)
+
+        filepath = os.path.join(source_directory, filename)
+
+        if not os.path.isfile(filepath):
+            continue
+
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        for regex, replacement in compiled_patterns:
+            content = regex.sub(replacement, content)
+
+        filename, ext = os.path.splitext(filename)
+        filename = re.sub("%FILENAME%",output_basename,filename)
+        base_filename = f"{filename}{ext}"
+        final_filename = base_filename
+        
+        if not overwrite:
+            counter = 1
+            while os.path.exists(final_filename):
+                final_filename = f"{filename}_{counter}{ext}"
+                counter += 1
+
+        with open(final_filename, 'w', encoding='utf-8') as f:
+            f.write(content)
+            
+        print(f"Generated: {final_filename}")
+
+# ####################################################################################################
 # Main function
 # ####################################################################################################
 def main():
 
-    parser = argparse.ArgumentParser(description="Convert Swagger 2.0 or OpenAPI 3.0 JSON to WADL + XSD")
-    parser.add_argument("swagger_file", help="Path to Swagger/OpenAPI JSON file")
-    parser.add_argument("--output-dir", default=".", help="Directory to save WADL and XSD files")
-    args = parser.parse_args()
+    global OSB_PATH
+    global SERVICE_NAME
+    global SERVICE_VERSION
+    global TARGET_NAMESPACE
 
+    # definisce classe custom per la formattazione dell'helper degli arguments
+    class CustomFormatter(argparse.ArgumentDefaultsHelpFormatter):
+        def __init__(self, *args, **kwargs):
+            kwargs['max_help_position'] = 40
+            kwargs['width'] = 150
+            super().__init__(*args, **kwargs)
+            
+    # definisce argomenti a command line e ne fa il parsin
+    parser = argparse.ArgumentParser(description="Convert Swagger 2.0 or OpenAPI 3.0 JSON to WADL + XSD",formatter_class=CustomFormatter)
+    parser.add_argument("descriptor_file", help="Path to Swagger/OpenAPI JSON file")
+    parser.add_argument("--ns", default=TARGET_NAMESPACE, help="Target namespace")
+    parser.add_argument("--osb-path", default="<auto-detect>", help="OSB resources path ref prefix")
+    parser.add_argument("--xsd-prefix", default="XS_", help="XSD filename prefix")
+    parser.add_argument("--wadl-prefix", default="WA_", help="WADL filename prefix")
+    parser.add_argument("--wsdl-prefix", default="WS_", help="WSDL filename prefix")
+    parser.add_argument("--wsdl-name", default=SERVICE_NAME, help="WSDL Service Name")
+    parser.add_argument("--wsdl-ver", default=SERVICE_VERSION, help="WSDL Service Version")
+    parser.add_argument("--file-base", default="<input-file>", help="Filename base for output files (XSD,WADL,WSDL)")
+    parser.add_argument("--output-dir", default=".", help="Directory to save files")
+    parser.add_argument("--templates-dir", help="Directory for search & replace templates")
+    args = parser.parse_args()
+    
+    # aggiorna altri parametri globali in base a argomenti command-line
+    SERVICE_NAME = args.wsdl_name
+    SERVICE_VERSION = args.wsdl_ver
+    TARGET_NAMESPACE = args.ns
+    
+    # Se non è valorizzata inizializza la variabile di sostituzione %OSB_PATH% con i due livelli della directory corrente (<parent-dir>/<current-dir>).
+    # Può essere utilizzata nei template di risorse OSB come prefisso del path delle risorse negli attributi REF che richiedono il path assoluto OSB.
+    # Il default presuppone che ci si trovi in un subfolder di un progetto OSB in cui folder corrisponde a quello del progetto (<project>/<folder>).
+    if args.osb_path!="<auto-detect>":
+        OSB_PATH = args.osb_path
+    else:
+        OSB_PATH = os.path.abspath(args.output_dir)
+        OSB_PATH = os.path.basename(os.path.abspath(args.output_dir+"/.."))+"/"+os.path.basename(os.path.abspath(args.output_dir))
+    
     # Carica il file json del descrittore di input
-    with open(args.swagger_file, "r", encoding="utf-8") as f:
+    with open(args.descriptor_file, "r", encoding="utf-8") as f:
         spec = json.load(f)
 
     # Prepara i nomi dei file di output
-    filename_base = os.path.splitext(os.path.basename(args.swagger_file))[0]
-    xsd_filename = f"{filename_base}.xsd"
-    wadl_filename = f"{filename_base}.wadl"
+    filename_base = os.path.splitext(os.path.basename(args.descriptor_file))[0] if args.file_base=="<input-file>" else args.file_base
+    
+    xsd_filename_base = f"{args.xsd_prefix}{filename_base}"
+    xsd_filename = xsd_filename_base+".xsd"
+    wadl_filename_base = f"{args.wadl_prefix}{filename_base}"
+    wadl_filename = wadl_filename_base+".wadl"
+    wsdl_filename_base = f"{args.wsdl_prefix}{filename_base}"
+    wsdl_filename = wsdl_filename_base+".wsdl"
 
     # Rileva versione (Swagger/OpenApi2 o OpenApi 3)
     version = detect_version(spec)
     
     # Censisce i tipi utilizzati a vario titolo
+    element_registry = {}
     nullability_registry = {}
     restriction_registry = {}
 
-    main_definitions = set()
     root_definitions = extract_root_definitions(spec, version)
     used_definitions = extract_used_definitions(spec, version, root_definitions)
     
     # Generazione del WADL
-    wadl_tree = generate_wadl(spec,version,root_definitions,main_definitions,xsd_filename,nullability_registry,restriction_registry)
+    wadl_tree = generate_wadl(spec,version,root_definitions,xsd_filename,element_registry,nullability_registry,restriction_registry)
+
+    # Generazione del WSDL
+    wsdl_tree = generate_wsdl(wadl_tree,xsd_filename)
     
     # Generazione XSD 
-    xsd_tree = generate_xsd(root_definitions,used_definitions,main_definitions,nullability_registry,restriction_registry)
+    xsd_tree = generate_xsd(root_definitions,used_definitions,element_registry,nullability_registry,restriction_registry)
 
     # Scrittura file XSD
     with open(os.path.join(args.output_dir, xsd_filename), "w", encoding="utf-8") as f:
@@ -772,8 +1128,31 @@ def main():
     with open(os.path.join(args.output_dir, wadl_filename), "w", encoding="utf-8") as f:
         f.write(prettify_xml(wadl_tree))
 
+    # Scrittura file WSDL
+    with open(os.path.join(args.output_dir, wsdl_filename), "w", encoding="utf-8") as f:
+        f.write(prettify_xml(wsdl_tree))
+
     print(f"Generated XSD: {xsd_filename}")
     print(f"Generated WADL: {wadl_filename}")
+    print(f"Generated WSDL: {wsdl_filename}")
+
+    # Esegue Search & Replace degli eventuali template
+    replacements = [
+        (r"%OSB_PATH%", OSB_PATH),
+        (r"%BINDING%", f"{SERVICE_NAME}_{SERVICE_VERSION}_Binding"),
+        (r"%NAMESPACE%", TARGET_NAMESPACE),
+        (r"%FILENAME_BASE%", filename_base),
+        (r"%XSD_FILENAME%", xsd_filename),
+        (r"%WADL_FILENAME%", wadl_filename),
+        (r"%WSDL_FILENAME%", wsdl_filename),
+        (r"%XSD_FILENAME_BASE%", xsd_filename_base),
+        (r"%WADL_FILENAME_BASE%", wadl_filename_base),
+        (r"%WSDL_FILENAME_BASE%", wsdl_filename_base)
+    ]
+    
+    # Se è definito il folder dei template ne esegue il parsing
+    if args.templates_dir:
+       batch_search_and_replace_templates(args.templates_dir, replacements, filename_base)    
 
 # ####################################################################################################
 # Entry point

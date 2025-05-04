@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ser:proxyServiceEntry xmlns:ser="http://www.bea.com/wli/sb/services" xmlns:con="http://www.bea.com/wli/sb/services/security/config" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:oper="http://xmlns.oracle.com/servicebus/proxy/operations" xmlns:tran="http://www.bea.com/wli/sb/transports" xmlns:env="http://www.bea.com/wli/config/env">
+    <ser:coreEntry>
+        <ser:description>$Revision$
+$Author$ 
+$Date$</ser:description>
+        <ser:security>
+            <con:inboundWss processWssHeader="true"/>
+        </ser:security>
+        <ser:binding type="REST" xsi:type="con:RestBindingType" xmlns:con="http://www.bea.com/wli/sb/services/bindings/config">
+            <con:wsdl ref="%OSB_PATH%/%WSDL_FILENAME_BASE%"/>
+            <con:binding>
+                <con:name>%BINDING%</con:name>
+                <con:namespace>%NAMESPACE%</con:namespace>
+            </con:binding>
+            <con:wadl ref="%OSB_PATH%/%WADL_FILENAME_BASE%"/>
+        </ser:binding>
+        <oper:operations enabled="true"/>
+        <ser:ws-policy>
+            <ser:binding-mode>no-policies</ser:binding-mode>
+        </ser:ws-policy>
+        <ser:invoke ref="%OSB_PATH%/PL_%FILENAME_BASE%" xsi:type="con1:PipelineRef" xmlns:ref="http://www.bea.com/wli/sb/reference" xmlns:con1="http://www.bea.com/wli/sb/pipeline/config"/>
+        <ser:xqConfiguration>
+            <ser:snippetVersion>1.0</ser:snippetVersion>
+        </ser:xqConfiguration>
+    </ser:coreEntry>
+    <ser:endpointConfig>
+        <tran:provider-id>http</tran:provider-id>
+        <tran:inbound>true</tran:inbound>
+        <tran:URI>
+            <env:value>/example</env:value>
+        </tran:URI>
+        <tran:inbound-properties/>
+        <tran:provider-specific xsi:type="http:HttpEndPointConfiguration" xmlns:http="http://www.bea.com/wli/sb/transports/http">
+            <http:inbound-properties>
+                <http:client-authentication xsi:type="http:HttpBasicAuthenticationType"/>
+            </http:inbound-properties>
+        </tran:provider-specific>
+    </ser:endpointConfig>
+</ser:proxyServiceEntry>
