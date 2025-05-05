@@ -1133,8 +1133,13 @@ def main():
     SERVICE_VERSION = args.wsdl_ver
     TARGET_NAMESPACE = args.ns
     
+    print("")
     print("NULL_MODE:",NULL_MODE)
     print("ARRAY_MODE:",ARRAY_MODE)
+    print("SERVICE_NAME:",SERVICE_NAME)
+    print("SERVICE_VERSION:",SERVICE_VERSION)
+    print("TARGET_NAMESPACE:",TARGET_NAMESPACE)
+    print("")
     
     # Se non è valorizzata inizializza la variabile di sostituzione %OSB_PATH% con i due livelli della directory corrente (<parent-dir>/<current-dir>).
     # Può essere utilizzata nei template di risorse OSB come prefisso del path delle risorse negli attributi REF che richiedono il path assoluto OSB.
