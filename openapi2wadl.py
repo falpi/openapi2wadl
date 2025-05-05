@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import json
+import enum
 import argparse
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -19,6 +20,9 @@ from xml.dom import minidom
 # ####################################################################################################
 
 OSB_PATH = ""
+NULL_MODE = "nillable"
+ARRAY_MODE = "inline"
+
 SERVICE_NAME = "MyServiceName"
 SERVICE_VERSION = "1.0"
 
@@ -234,7 +238,7 @@ def map_restrictions(element, schema):
 # ####################################################################################################
 def map_nullability(schema, type_prefix, type_name, nullability_registry, restriction_registry):
    
-    if not schema.get("nullable",False):
+    if (not schema.get("nullable",False)) or (NULL_MODE=="nillable"):
         return f"{type_prefix}:{type_name}"
     else:        
         nillable_type = f"{type_name}Nillable"
@@ -425,14 +429,14 @@ def generate_xsd_simple_type(level, parent_element, schema, nullability_registry
         return
 
     # se necessario aggiunge attributo di nullability
-    if schema.get("nullable", False):
+    if schema.get("nullable", False) and NULL_MODE!="union":
        parent_element.set('nillable',"true")    
             
     # determina il tipo xsd più appropriato 
     mapped_type = map_type(schema,nullability_registry,restriction_registry)
 
     # riacquisisce parametri tipo 
-    type_nullable = schema.get("nullable", False)    
+    type_nullable = schema.get("nullable", False) and NULL_MODE!="nillable"    
     type_restrictions = get_restrictions(schema)
     
     # crea il nodo xml appropriato al tipo dell'elemento
@@ -477,11 +481,16 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
         max_len = def_body.get("maxItems","unbounded")
         
         # crea nodi per array
-        array_type = ET.SubElement(parent_element,f"{{{XSD_NAMESPACE}}}complexType")             
-        array_sequence = ET.SubElement(array_type, f"{{{XSD_NAMESPACE}}}sequence")
-        array_element = ET.SubElement(array_sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
-            "name": "item", "minOccurs": f"{min_len}", "maxOccurs": f"{max_len}"
-        })
+        if ARRAY_MODE=="inline":
+            array_element = parent_element
+            array_element.set("minOccurs",min_len)
+            array_element.set("maxOccurs",max_len)
+        else:
+            array_type = ET.SubElement(parent_element,f"{{{XSD_NAMESPACE}}}complexType")             
+            array_sequence = ET.SubElement(array_type, f"{{{XSD_NAMESPACE}}}sequence")
+            array_element = ET.SubElement(array_sequence, f"{{{XSD_NAMESPACE}}}element", attrib={
+                "name": "item", "minOccurs": f"{min_len}", "maxOccurs": f"{max_len}"
+            })
         
         # se è un nodo radice aggiunge l'attributo del nome
         if (root_name!=""):
@@ -498,7 +507,7 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
         def_properties = def_body.get("properties", {})
 
         # determina padding per i type degli elementi
-        name_padding = max([len(p) for p, a in def_properties.items() if a.get("type") != "array"] or [0])
+        name_padding = max([len(p) for p, a in def_properties.items() if a.get("type") != "array" or ARRAY_MODE=="inline"] or [0])
            
         # crea nodi per complex type
         complex_type = ET.SubElement(parent_element,f"{{{XSD_NAMESPACE}}}complexType")             
@@ -509,19 +518,25 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
            complex_type.set("name",root_name)
 
         # esegue un ciclo su tutte le proprietà del complex type
-        for properation_name, prop_attrs in def_properties.items():
+        for prop_name, prop_attrs in def_properties.items():
                         
             # crea attributi per nodo 
-            element_attrib = {"name": properation_name}
+            element_attrib = {"name": prop_name}
             
-            if properation_name not in def_required:
+            # verifica e gestisce se l'elemento non è obbligatorio
+            if prop_name not in def_required:
                 element_attrib["minOccurs"] = "0"
 
-            # verifica se si tratta di un $ref
-            prop_ref = prop_attrs.get("$ref","");                    
+            # acquisisce attributi proprietà
+            prop_ref = prop_attrs.get("$ref",""); 
+            prop_type = prop_attrs.get("type"); 
                 
-            # se si tratta di un tipo array o object esegue, altrimenti procede
-            if prop_ref=="" and prop_attrs.get("type") in ["array","object"]:
+            # se non si tratta $ref ed è un tipo array o object esegue, altrimenti procede
+            if prop_ref=="" and prop_type in ["array","object"]:
+            
+                # se necessario corregge nome elemento per introdurre padding
+                if prop_type=="array" and ARRAY_MODE=="inline":
+                    element_attrib["name"] = element_attrib["name"] + (" " * (name_padding-len(prop_name)))
                                                     
                 # crea nodo per elemento di tipo array
                 complex_element = ET.SubElement(sequence,f"{{{XSD_NAMESPACE}}}element", attrib=element_attrib)
@@ -532,7 +547,7 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
             else:
             
                 # corregge nome elemento per introdurre padding
-                element_attrib["name"] = element_attrib["name"] + (" " * (name_padding-len(properation_name)))
+                element_attrib["name"] = element_attrib["name"] + (" " * (name_padding-len(prop_name)))
                     
                 # crea nodo per elemento semplice
                 simple_element = ET.SubElement(sequence,f"{{{XSD_NAMESPACE}}}element", attrib=element_attrib)
@@ -1040,27 +1055,66 @@ def batch_search_and_replace_templates(source_directory, replacements, output_ba
             
         print(f"Generated: {final_filename}")
 
+# definisce classe custom per la formattazione dell'helper degli arguments
+class ArgsCustomFormatter(argparse.ArgumentDefaultsHelpFormatter):
+    def __init__(self, *args, **kwargs):
+        kwargs['max_help_position'] = 40
+        kwargs['width'] = 150
+        super().__init__(*args, **kwargs)
+        
+# definisce classe custom per l'uso di argomenti enumerati
+class ArgsEnumAction(argparse.Action):
+    def __init__(self, **kwargs):
+        # Pop off the type value
+        enum_type = kwargs.pop("type", None)
+
+        # Ensure an Enum subclass is provided
+        if enum_type is None:
+            raise ValueError("type must be assigned an Enum when using ArgsEnumAction")
+        if not issubclass(enum_type, enum.Enum):
+            raise TypeError("type must be an Enum when using ArgsEnumAction")
+
+        # Generate choices from the Enum
+        kwargs.setdefault("choices", tuple(e.value for e in enum_type))
+
+        super(ArgsEnumAction, self).__init__(**kwargs)
+
+        self._enum = enum_type
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        # Convert value back into an Enum
+        value = self._enum(values)
+        setattr(namespace, self.dest, value)
+        
 # ####################################################################################################
 # Main function
 # ####################################################################################################
 def main():
 
+    # dichiara variabili globali
     global OSB_PATH
+    global NULL_MODE
+    global ARRAY_MODE
     global SERVICE_NAME
     global SERVICE_VERSION
     global TARGET_NAMESPACE
-
-    # definisce classe custom per la formattazione dell'helper degli arguments
-    class CustomFormatter(argparse.ArgumentDefaultsHelpFormatter):
-        def __init__(self, *args, **kwargs):
-            kwargs['max_help_position'] = 40
-            kwargs['width'] = 150
-            super().__init__(*args, **kwargs)
             
+    # definizioni per argomenti command-line con enumerazioni
+    class ArrayMode(enum.Enum):
+        a = "inline"
+        b = "expand"
+        
+    class NullMode(enum.Enum):
+        a = "both"
+        b = "union"
+        c = "nillable"
+        
     # definisce argomenti a command line e ne fa il parsin
-    parser = argparse.ArgumentParser(description="Convert Swagger 2.0 or OpenAPI 3.0 JSON to WADL + XSD",formatter_class=CustomFormatter)
+    parser = argparse.ArgumentParser(description="Convert Swagger 2.0 or OpenAPI 3.0 JSON to WADL + XSD",formatter_class=ArgsCustomFormatter)
     parser.add_argument("descriptor_file", help="Path to Swagger/OpenAPI JSON file")
     parser.add_argument("--ns", default=TARGET_NAMESPACE, help="Target namespace")
+    parser.add_argument("--null-mode", default=NULL_MODE, type=NullMode, help="Null values conversion behaviour", action=ArgsEnumAction)
+    parser.add_argument("--array-mode", default=ARRAY_MODE, type=ArrayMode, help="Array values conversion behaviour", action=ArgsEnumAction)
     parser.add_argument("--osb-path", default="<auto-detect>", help="OSB resources path ref prefix")
     parser.add_argument("--xsd-prefix", default="XS_", help="XSD filename prefix")
     parser.add_argument("--wadl-prefix", default="WA_", help="WADL filename prefix")
@@ -1073,9 +1127,14 @@ def main():
     args = parser.parse_args()
     
     # aggiorna altri parametri globali in base a argomenti command-line
+    NULL_MODE = args.null_mode if isinstance(args.null_mode,str) else args.null_mode.value
+    ARRAY_MODE = args.array_mode if isinstance(args.array_mode,str) else args.array_mode.value
     SERVICE_NAME = args.wsdl_name
     SERVICE_VERSION = args.wsdl_ver
     TARGET_NAMESPACE = args.ns
+    
+    print("NULL_MODE:",NULL_MODE)
+    print("ARRAY_MODE:",ARRAY_MODE)
     
     # Se non è valorizzata inizializza la variabile di sostituzione %OSB_PATH% con i due livelli della directory corrente (<parent-dir>/<current-dir>).
     # Può essere utilizzata nei template di risorse OSB come prefisso del path delle risorse negli attributi REF che richiedono il path assoluto OSB.
