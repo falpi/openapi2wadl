@@ -125,68 +125,6 @@ def extract_root_schemas(spec, version):
         return spec.get("components", {}).get("schemas", {})
         
 # ####################################################################################################
-# Estrae ricorsivamente le definizioni dei tipi referenziati in cascata a partire dai
-# tipi dell'interfaccia di request, inclusi quelli annidati via $ref in oggetti o array.
-# ####################################################################################################
-def extract_used_schemas(spec, version, root_schemas):
-
-    used_schemas = set()
-
-    # ================================================================================================
-    # Support function
-    # ================================================================================================
-    def visit_schema(schema):
-        
-        if not isinstance(schema, dict):
-            return
-            
-        # Caso $ref
-        if "$ref" in schema:
-            type_name = schema["$ref"].split("/")[-1]
-            if type_name not in used_schemas:
-                used_schemas.add(type_name)
-                type_def = root_schemas.get(type_name)
-                if type_def:
-                    visit_schema(type_def)  # Ricorsione sul tipo referenziato
-                    
-        # Caso array
-        elif schema.get("type") == "array" and "items" in schema:
-            visit_schema(schema["items"])
-            
-        # Caso oggetto inline
-        elif schema.get("type") == "object":
-            for properties in schema.get("properties", {}).values():
-                visit_schema(properties)
-
-    # ================================================================================================
-    # Function body
-    # ================================================================================================
-    for path, methods in spec.get("paths", {}).items():
-        for method_spec in methods.values():
-        
-            if version == "swagger2":
-                # Request body
-                for param in method_spec.get("parameters", []):
-                    if param.get("in") == "body" and "schema" in param:
-                        visit_schema(param["schema"])
-                # Responses
-                for response in method_spec.get("responses", {}).values():
-                    if "schema" in response:
-                        visit_schema(response["schema"])
-                        
-            if version == "openapi3":
-                # Request body
-                for content in method_spec.get("requestBody",{}).get("content", {}).values():
-                    visit_schema(content["schema"])
-                        
-                # Responses
-                for response in method_spec.get("responses", {}).values():
-                    for content in response.get("content", {}).values():
-                        visit_schema(content["schema"])
-
-    return used_schemas    
-
-# ####################################################################################################
 # Risolve i $ref dei parametri
 # ####################################################################################################       
 def resolve_ref_responses(response, root_responses):
@@ -624,7 +562,7 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_schemas, 
 # ####################################################################################################
 # Genera il file XSD
 # ####################################################################################################
-def generate_xsd(root_schemas,used_schemas,element_registry,nullability_registry,restriction_registry):
+def generate_xsd(root_schemas,element_registry,nullability_registry,restriction_registry):
 
     # funzione di supporto per ordinamento dei simple type per le restriction
     def sorting_criteria(restriction_element):
@@ -662,9 +600,7 @@ def generate_xsd(root_schemas,used_schemas,element_registry,nullability_registry
     for idx, (def_name, def_body) in enumerate(root_schemas.items()):
 
         # se necessario crea separatore tra i complex type
-        if not def_name in used_schemas:
-            complex_types.append(ET.Comment(f" #unused# "))
-        elif idx > 0:
+        if idx > 0:
             complex_types.append(ET.Comment(" ~~~~~~~~ "))
 
         # genera il prossimo complex type
@@ -1268,10 +1204,9 @@ def main():
     nullability_registry = {}
     restriction_registry = {}
 
+    root_schemas = extract_root_schemas(spec, version)
     root_responses = extract_root_responses(spec, version)
     root_parameters = extract_root_parameters(spec, version)
-    root_schemas = extract_root_schemas(spec, version)
-    used_schemas = extract_used_schemas(spec, version, root_schemas)
     
     # Generazione del WADL
     wadl_tree = generate_wadl(spec,version,root_responses,root_parameters,root_schemas,xsd_filename,element_registry,nullability_registry,restriction_registry)
@@ -1280,7 +1215,7 @@ def main():
     wsdl_tree = generate_wsdl(wadl_tree,xsd_filename)
     
     # Generazione XSD 
-    xsd_tree = generate_xsd(root_schemas,used_schemas,element_registry,nullability_registry,restriction_registry)
+    xsd_tree = generate_xsd(root_schemas,element_registry,nullability_registry,restriction_registry)
 
     # Scrittura file XSD
     with open(os.path.join(args.output_dir, xsd_filename), "w", encoding="utf-8") as f:
