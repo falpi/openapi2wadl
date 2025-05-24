@@ -90,25 +90,47 @@ def detect_version(spec):
     elif "openapi" in spec and spec["openapi"].startswith("3."):
         return "openapi3"
     else:
-        raise ValueError("Unsupported OpenAPI/Swagger version")
+        # genera eccezione    
+        print("Unsupported OpenAPI/Swagger version")
+        sys.exit()
 
 # ####################################################################################################
-# Estrare la definizione dei tipi di primo livello
+# Estrare la definizione dei parametri riusabili
 # ####################################################################################################
-def extract_root_definitions(spec, version):
+def extract_root_responses(spec, version):
+
+    if version == "swagger2":
+        return spec.get("responses", {})
+    else:
+        return spec.get("components", {}).get("responses", {})
+        
+# ####################################################################################################
+# Estrare la definizione dei parametri riusabili
+# ####################################################################################################
+def extract_root_parameters(spec, version):
+
+    if version == "swagger2":
+        return spec.get("parameters", {})
+    else:
+        return spec.get("components", {}).get("parameters", {})
+        
+# ####################################################################################################
+# Estrare la definizione dei schema riusabili
+# ####################################################################################################
+def extract_root_schemas(spec, version):
 
     if version == "swagger2":
         return spec.get("definitions", {})
     else:
         return spec.get("components", {}).get("schemas", {})
-
+        
 # ####################################################################################################
 # Estrae ricorsivamente le definizioni dei tipi referenziati in cascata a partire dai
 # tipi dell'interfaccia di request, inclusi quelli annidati via $ref in oggetti o array.
 # ####################################################################################################
-def extract_used_definitions(spec, version, root_definitions):
+def extract_used_schemas(spec, version, root_schemas):
 
-    used_definitions = set()
+    used_schemas = set()
 
     # ================================================================================================
     # Support function
@@ -121,9 +143,9 @@ def extract_used_definitions(spec, version, root_definitions):
         # Caso $ref
         if "$ref" in schema:
             type_name = schema["$ref"].split("/")[-1]
-            if type_name not in used_definitions:
-                used_definitions.add(type_name)
-                type_def = root_definitions.get(type_name)
+            if type_name not in used_schemas:
+                used_schemas.add(type_name)
+                type_def = root_schemas.get(type_name)
                 if type_def:
                     visit_schema(type_def)  # Ricorsione sul tipo referenziato
                     
@@ -162,12 +184,38 @@ def extract_used_definitions(spec, version, root_definitions):
                     for content in response.get("content", {}).values():
                         visit_schema(content["schema"])
 
-    return used_definitions    
+    return used_schemas    
 
+# ####################################################################################################
+# Risolve i $ref dei parametri
+# ####################################################################################################       
+def resolve_ref_responses(response, root_responses):
+
+    # se è un $ref esegue
+    if "$ref" in response:    
+        type_name = response.get("$ref").split("/")[-1]
+        response = root_responses.get(type_name, {}).copy()
+        
+    # restisuisce risultato
+    return response
+    
+# ####################################################################################################
+# Risolve i $ref dei parametri
+# ####################################################################################################       
+def resolve_ref_parameters(parameter, root_parameters):
+
+    # se è un $ref esegue
+    if "$ref" in parameter:    
+        type_name = parameter.get("$ref").split("/")[-1]
+        parameter = root_parameters.get(type_name, {}).copy()
+        
+    # restisuisce risultato
+    return parameter
+      
 # ####################################################################################################
 # Risolve ricorsivamente gli $ref, evitando loop infiniti e unendo le proprietà
 # ####################################################################################################       
-def resolve_ref(schema, root_definitions, seen=None):
+def resolve_ref(schema, root_schemas, seen=None):
 
     # se è un $ref esegue
     if "$ref" in schema:
@@ -185,8 +233,8 @@ def resolve_ref(schema, root_definitions, seen=None):
         seen.add(type_name)
 
         # determina ricorsivamente il primo schema della catena nidificata di $ref
-        resolved = root_definitions.get(type_name, {}).copy()        
-        nested = resolve_ref(resolved, root_definitions, seen)
+        resolved = root_schemas.get(type_name, {}).copy()        
+        nested = resolve_ref(resolved, root_schemas, seen)
         
         # restituisce 
         return {**nested, **schema}  # priorità a schema locale
@@ -198,10 +246,23 @@ def resolve_ref(schema, root_definitions, seen=None):
 # Acquisce le restrizioni dalle proprietà dal swagger/openapi
 # ####################################################################################################
 def get_restrictions(schema):
-    return {
-        k: schema[k]
-        for k in ["minLength", "maxLength", "pattern", "enum", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] if k in schema
-    }
+
+    type_name = schema.get("type")
+    
+    if (type_name in ["number","integer"]):
+        return {
+            k: schema[k]
+            for k in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] if k in schema
+        }
+    
+    elif (type_name=="string"):
+        return {
+            k: schema[k]
+            for k in ["minLength", "maxLength", "pattern", "enum"] if k in schema
+        }    
+        
+    else:
+        return {}        
     
 # ####################################################################################################
 # Esegue mapping delle restrizioni da swagger/openapi a XSD
@@ -462,16 +523,16 @@ def generate_xsd_simple_type(level, parent_element, schema, nullability_registry
 # ####################################################################################################
 # Genera ComplexType
 # ####################################################################################################
-def generate_xsd_type(level, parent_element, root_name, def_body, root_definitions, nullability_registry, restriction_registry):
+def generate_xsd_type(level, parent_element, root_name, def_body, root_schemas, nullability_registry, restriction_registry):
 
     # verifica se si tratta di un $ref
     def_ref = def_body.get("$ref","");                    
                     
     # risolve eventuali $ref sullo schema body
-    def_body = resolve_ref(def_body, root_definitions)      
+    def_body = resolve_ref(def_body, root_schemas)      
 
     #  determina il tipo dello schema
-    def_type = def_body.get("type", "");    
+    def_type = def_body.get("type", "object");    
     
     # se si tratta di un array esegue
     if def_ref=="" and def_type == "array":
@@ -497,7 +558,7 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
            array_type.set("name",root_name)
         
         # genera definizione del tipo in modo ricorsivo
-        generate_xsd_type(level+1,array_element,"",def_body.get("items", {}),root_definitions,nullability_registry,restriction_registry)               
+        generate_xsd_type(level+1,array_element,"",def_body.get("items", {}),root_schemas,nullability_registry,restriction_registry)               
     
     # se si tratta di un object esegue
     elif def_ref=="" and def_type == "object":
@@ -542,7 +603,7 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
                 complex_element = ET.SubElement(sequence,f"{{{XSD_NAMESPACE}}}element", attrib=element_attrib)
                 
                 # genera definizione del tipo
-                generate_xsd_type(level+1,complex_element,"",prop_attrs,root_definitions,nullability_registry,restriction_registry)
+                generate_xsd_type(level+1,complex_element,"",prop_attrs,root_schemas,nullability_registry,restriction_registry)
                 
             else:
             
@@ -563,9 +624,9 @@ def generate_xsd_type(level, parent_element, root_name, def_body, root_definitio
 # ####################################################################################################
 # Genera il file XSD
 # ####################################################################################################
-def generate_xsd(root_definitions,used_definitions,element_registry,nullability_registry,restriction_registry):
+def generate_xsd(root_schemas,used_schemas,element_registry,nullability_registry,restriction_registry):
 
-    # funzione di supporto per ordinamento dei simple type
+    # funzione di supporto per ordinamento dei simple type per le restriction
     def sorting_criteria(restriction_element):
     
         min_len = None
@@ -598,16 +659,16 @@ def generate_xsd(root_definitions,used_definitions,element_registry,nullability_
     # ================================================================================================
 
     # Esegue un ciclo su tutti i tipi definiti al primo livello del contract
-    for idx, (def_name, def_body) in enumerate(root_definitions.items()):
+    for idx, (def_name, def_body) in enumerate(root_schemas.items()):
 
         # se necessario crea separatore tra i complex type
-        if not def_name in used_definitions:
+        if not def_name in used_schemas:
             complex_types.append(ET.Comment(f" #unused# "))
         elif idx > 0:
             complex_types.append(ET.Comment(" ~~~~~~~~ "))
 
         # genera il prossimo complex type
-        generate_xsd_type(0,complex_types, def_name, def_body, root_definitions, nullability_registry, restriction_registry)
+        generate_xsd_type(0,complex_types, def_name, def_body, root_schemas, nullability_registry, restriction_registry)
                             
     # ================================================================================================
     # Genera Special Types
@@ -679,9 +740,26 @@ def generate_xsd(root_definitions,used_definitions,element_registry,nullability_
     return schema
 
 # ####################################################################################################
+# Genera lo operationId
+# ####################################################################################################
+def derive_operation_id(path,method_name):
+
+    parts = path.strip("/").split("/")
+
+    operation_id_parts = []
+    for part in parts:
+        if part.startswith("{") and part.endswith("}"):
+            param = part[1:-1]
+            operation_id_parts.append(f"By{param[0].upper()+param[1:]}")
+        else:
+            operation_id_parts.append(part[0].upper()+part[1:].lower())
+
+    return method_name.lower()+(''.join(operation_id_parts) if operation_id_parts else "Root")
+
+# ####################################################################################################
 # Genera il file WADL
 # ####################################################################################################
-def generate_wadl(spec,version,root_definitions,xsd_filename,element_registry,nullability_registry,restriction_registry):
+def generate_wadl(spec,version,root_responses,root_parameters,root_schemas,xsd_filename,element_registry,nullability_registry,restriction_registry):
     
     application = ET.Element(f"{{{WADL_NAMESPACE}}}application", attrib={
         f"xmlns:{XSD_PREFIX}": XSD_NAMESPACE,
@@ -730,19 +808,17 @@ def generate_wadl(spec,version,root_definitions,xsd_filename,element_registry,nu
 
             # Se manca operationId lo ricava dal path estraendone l'ultimo token ignorando eventuali parametri
             if not operationId:
-                parts = [p for p in path.strip("/").split("/") if not (p.startswith("{") and p.endswith("}"))]
-                operationId = parts[-1] if parts else method_name.lower()
+                operationId = derive_operation_id(path,method_name)
 
             # Genera elemento XML del metodo
             method = ET.SubElement(resource, f"{{{WADL_NAMESPACE}}}method", name=method_name.upper(), id=operationId, attrib={f"{{{SOA_NAMESPACE}}}wsdlOperation":operationId})
-                        
-            # Prepara nomi per gli element di interfaccia
-            request_name = operationId[0].upper()+operationId[1:]+"Request"
-            response_name = operationId[0].upper()+operationId[1:]+"Response"
-                                                
+                                                                                    
             # ------------------------------------------------------------------------------------------------
             # Genera Request
             # ------------------------------------------------------------------------------------------------ 
+
+            # Prepara nomi per gli element di interfaccia
+            request_name = operationId+"Request"
 
             # Genera elemento WADL della request del metodo
             request_elem = ET.SubElement(method,f"{{{WADL_NAMESPACE}}}request")
@@ -754,6 +830,9 @@ def generate_wadl(spec,version,root_definitions,xsd_filename,element_registry,nu
 
             # Gestione dei parameters diversi da body
             for param in parameters:
+
+                # Se si tratta di un parametro $ref lo risolve
+                param = resolve_ref_parameters(param,root_parameters)
             
                 # Acquisisce attributi parametro
                 param_name = param.get("name")
@@ -765,7 +844,8 @@ def generate_wadl(spec,version,root_definitions,xsd_filename,element_registry,nu
                     param_style = "template"
                 elif not param_style in ["query", "header", "matrix"]:
                     continue
-
+                
+                # Acquisisce lo schema del parametro
                 if not "schema" in param:
                    schema = param
                 else:
@@ -773,7 +853,7 @@ def generate_wadl(spec,version,root_definitions,xsd_filename,element_registry,nu
                    
                 # Se necessario mappa il tipo del parametro
                 param_type = map_type_atomic(schema)
-
+                
                 # Aggiunge parametro all'elemento WADL                
                 ET.SubElement(request_elem,f"{{{WADL_NAMESPACE}}}param", name=param_name, style=param_style, type=param_type, required=str(param_required).lower(),attrib={
                     f"{SOA_PREFIX}:expression": "$msg.parameters/"+param_name
@@ -849,32 +929,52 @@ def generate_wadl(spec,version,root_definitions,xsd_filename,element_registry,nu
             # Gestione delle response
             for status, response in responses.items():
                 
+                # Se si tratta di un parametro $ref lo risolve
+                response = resolve_ref_responses(response,root_responses)
+                   
+                # Prepara nomi per gli element di interfaccia
+                response_name = operationId+"Response"+("Status"+status if status!="200" else "")
+                
                 # Genera elemento WADL della response
                 response_elem = ET.SubElement(method,f"{{{WADL_NAMESPACE}}}response", status=status)
                 
                 # Prepara elenco delle response in base alla specifica
                 contents = response.get("content", {}) if version == "openapi3" else {"application/json": response}
                 
-                # Scandisce le response previste
-                for media_type, content_def in contents.items():
-                
-                    schema_ref = content_def.get("schema", {}).get("$ref")
+                # Se la response non è definita crea una representation/element vuoti, altrimenti procede
+                if version == "openapi3" and contents=={}:
+                                        
+                    # Se è già stato aggiunto un elemento all'XSD genera eccezione
+                    if response_name in element_registry:
+                        print("Duplicated operation name ("+response_name+")")
+                        sys.exit()
+                        
+                    # Aggiunge body all'elemento XSD
+                    element_registry[response_name] = ET.Element(f"{{{XSD_NAMESPACE}}}element", name=response_name)                           
                     
-                    # Se non è uno schema $ref non lo gestisce e aggiunge solo elemento WADL, altrimenti procede
-                    if not schema_ref:
-                        ET.SubElement(response_elem,f"{{{WADL_NAMESPACE}}}representation", mediaType=media_type)  
-                    else:
-                        type_name = schema_ref.split("/")[-1]
+                else:
+                    
+                    # Scandisce le response previste
+                    for media_type, content_def in contents.items():
+                    
+                        schema_ref = content_def.get("schema", {}).get("$ref")
                         
-                        # Aggiunge body all'elemento WADL                                                               
-                        ET.SubElement(response_elem,f"{{{WADL_NAMESPACE}}}representation", mediaType=media_type, element=f"{TARGET_PREFIX}:{response_name}")
-                        
-                        # Se è già stato aggiunto un elemento all'XSD genera eccezione
-                        if response_name in element_registry:
-                            raise Error("Duplicated operation name ("+response_name+")")       
+                        # Se non è uno schema $ref non lo gestisce e aggiunge solo elemento WADL, altrimenti procede
+                        if not schema_ref:
+                            ET.SubElement(response_elem,f"{{{WADL_NAMESPACE}}}representation", mediaType=media_type)  
+                        else:
+                            type_name = schema_ref.split("/")[-1]
                             
-                        # Aggiunge body all'elemento XSD
-                        element_registry[response_name] = ET.Element(f"{{{XSD_NAMESPACE}}}element", name=response_name, type=f"{TARGET_PREFIX}:{type_name}")                           
+                            # Aggiunge body all'elemento WADL                                                               
+                            ET.SubElement(response_elem,f"{{{WADL_NAMESPACE}}}representation", mediaType=media_type, element=f"{TARGET_PREFIX}:{response_name}")
+                            
+                            # Se è già stato aggiunto un elemento all'XSD genera eccezione
+                            if response_name in element_registry:
+                                print("Duplicated operation name ("+response_name+")")
+                                sys.exit()
+                                
+                            # Aggiunge body all'elemento XSD
+                            element_registry[response_name] = ET.Element(f"{{{XSD_NAMESPACE}}}element", name=response_name, type=f"{TARGET_PREFIX}:{type_name}")                           
 
     # ================================================================================================
 
@@ -938,14 +1038,10 @@ def generate_wsdl(application, xsd_filename):
             # Prepara operation
             operation_name = method.attrib.get("id") 
             operation_soa = method.attrib.get(f"{{{SOA_NAMESPACE}}}wsdlOperation") 
-            
-            # Se manca operationId lo ricava dal path estraendone l'ultimo token ignorando eventuali parametri
-            if not operation_name:
-                parts = [p for p in path.strip("/").split("/") if not (p.startswith("{") and p.endswith("}"))]
-                operation_name = parts[-1] if parts else method.attrib.get("name").lower()        
 
-            # Capitalizza operation
-            operation_name = operation_name[0].upper()+operation_name[1:]
+            # Se manca operation_name lo ricava dal path estraendone l'ultimo token ignorando eventuali parametri
+            if not operation_name:
+                operation_name = derive_operation_id(path,method.attrib.get("name"))            
         
             # Crea i message            
             msg_in = ET.SubElement(wsdl, f"{{{WSDL_NAMESPACE}}}message", name=f"{operation_name}_InputMessage")
@@ -1172,17 +1268,19 @@ def main():
     nullability_registry = {}
     restriction_registry = {}
 
-    root_definitions = extract_root_definitions(spec, version)
-    used_definitions = extract_used_definitions(spec, version, root_definitions)
+    root_responses = extract_root_responses(spec, version)
+    root_parameters = extract_root_parameters(spec, version)
+    root_schemas = extract_root_schemas(spec, version)
+    used_schemas = extract_used_schemas(spec, version, root_schemas)
     
     # Generazione del WADL
-    wadl_tree = generate_wadl(spec,version,root_definitions,xsd_filename,element_registry,nullability_registry,restriction_registry)
+    wadl_tree = generate_wadl(spec,version,root_responses,root_parameters,root_schemas,xsd_filename,element_registry,nullability_registry,restriction_registry)
 
     # Generazione del WSDL
     wsdl_tree = generate_wsdl(wadl_tree,xsd_filename)
     
     # Generazione XSD 
-    xsd_tree = generate_xsd(root_definitions,used_definitions,element_registry,nullability_registry,restriction_registry)
+    xsd_tree = generate_xsd(root_schemas,used_schemas,element_registry,nullability_registry,restriction_registry)
 
     # Scrittura file XSD
     with open(os.path.join(args.output_dir, xsd_filename), "w", encoding="utf-8") as f:
